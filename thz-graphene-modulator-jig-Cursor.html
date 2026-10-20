@@ -1,0 +1,1409 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Graphene THz Amplitude Modulator · Anatomy Jig</title>
+<style>
+  :root {
+    --void: #07080c;
+    --bone: #e7e1d6;
+    --dim: #9aa3b5;
+    --line: #2a3344;
+    --amber: #ff8500;
+    --gate: #3a86ff;
+    --ruby: #e63946;
+    --quartz: #1a2234;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--void); color: var(--bone); }
+  body {
+    font-family: Inter, "Segoe UI", system-ui, sans-serif;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  #stage { flex: 1; position: relative; min-height: 0; }
+  canvas { width: 100%; height: 100%; display: block; }
+  #bar {
+    height: 58px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 0 14px 0 12px;
+    border-top: 1px solid var(--line);
+    background: #0c0e14;
+    flex: none;
+  }
+  button, .shot {
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--bone);
+    background: transparent;
+    border: 1px solid var(--line);
+    height: 32px;
+    padding: 0 10px;
+    cursor: pointer;
+  }
+  button:hover, .shot:hover { border-color: #5c6b82; }
+  button[aria-pressed="true"], .shot[aria-pressed="true"] { border-color: var(--amber); color: var(--amber); }
+  input[type="range"] { flex: 1; accent-color: var(--amber); min-width: 80px; }
+  #tc {
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: 12px;
+    color: var(--dim);
+    min-width: 148px;
+    text-align: right;
+  }
+  .sr {
+    position: absolute;
+    width: 1px; height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+  }
+  body.clean #bar { display: none; }
+  @media (prefers-reduced-motion: reduce) {
+    #bar, button { transition: none; }
+  }
+  @media (max-width: 860px) {
+    #bar { height: auto; flex-wrap: wrap; padding: 8px; }
+    #shots { display: none; }
+  }
+</style>
+</head>
+<body>
+<div id="stage">
+  <canvas id="c" aria-label="Anatomy jig of a graphene terahertz amplitude modulator"></canvas>
+</div>
+<div id="bar">
+  <button id="play" type="button" aria-pressed="true">Pause</button>
+  <button id="replay" type="button">Replay</button>
+  <div id="shots" role="group" aria-label="Shots">
+    <button class="shot" type="button" data-f="0">01</button>
+    <button class="shot" type="button" data-f="151">02</button>
+    <button class="shot" type="button" data-f="301">03</button>
+    <button class="shot" type="button" data-f="511">04</button>
+    <button class="shot" type="button" data-f="751">05</button>
+  </div>
+  <input id="scrub" type="range" min="0" max="1020" value="0" aria-label="Frame">
+  <span id="tc">0:00.0 · 0000</span>
+  <button id="export" type="button">Export WebM</button>
+</div>
+<p id="live" class="sr" aria-live="polite"></p>
+<script>
+(() => {
+  const FPS = 30;
+  const TOTAL = 1020;
+  const C = {
+    void: "#07080c",
+    si: "#0C0E14",
+    quartz: "#1A2234",
+    amber: "#FF8500",
+    gate: "#3A86FF",
+    ruby: "#E63946",
+    bone: "#E7E1D6",
+    dim: "#9AA3B5",
+    gold: "#E4C27A",
+    goldHi: "#F6E7C4",
+    metal: "#2C333D",
+    carrier: "#161B22"
+  };
+
+  const COLS = 5, ROWS = 4, PITCH = 0.56;
+  const R = 0.188, GH = 0.46, GAP = -Math.PI / 2;
+  const OX = -((COLS - 1) * PITCH) / 2;
+  const OY = -((ROWS - 1) * PITCH) / 2;
+  const FI = 2, FJ = 1;
+
+  const stack = {
+    carrier: { w: 6.5, d: 4.7, h: 0.18, z: 0.00, lift: 0.00 },
+    gate:    { w: 3.35, d: 2.45, h: 0.035, z: 0.20, lift: 0.42 },
+    quartz:  { w: 4.55, d: 3.35, h: 0.22, z: 0.26, lift: 0.85 },
+    si:      { w: 3.55, d: 2.55, h: 0.12, z: 0.50, lift: 1.35 }
+  };
+  const GZ = 0.635;
+  const GLIFT = 1.85;
+  const SZ = 0.655;
+  const SLIFT = 2.25;
+
+  const canvas = document.getElementById("c");
+  const ctx = canvas.getContext("2d", { alpha: false });
+  const playBtn = document.getElementById("play");
+  const scrub = document.getElementById("scrub");
+  const tcEl = document.getElementById("tc");
+  const live = document.getElementById("live");
+
+  const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const params = new URLSearchParams(location.search);
+  if (params.has("clean")) document.body.classList.add("clean");
+
+  let frame = clamp(Math.round(Number(params.get("frame") || 0)), 0, TOTAL);
+  let playing = !reduce && params.get("pause") !== "1";
+  let acc = 0;
+  let last = 0;
+  let exportRec = null;
+
+  const noise = document.createElement("canvas");
+  noise.width = 160;
+  noise.height = 160;
+  const nctx = noise.getContext("2d");
+  const img = nctx.createImageData(160, 160);
+  let seed = 0x51A7;
+  for (let i = 0; i < img.data.length; i += 4) {
+    seed = (seed * 16807 + 11) % 2147483647;
+    const v = 118 + (seed % 40);
+    img.data[i] = v; img.data[i + 1] = v; img.data[i + 2] = v; img.data[i + 3] = 28;
+  }
+  nctx.putImageData(img, 0, 0);
+
+  const arcLocal = [];
+  {
+    const a0 = GAP + GH;
+    const a1 = GAP - GH + Math.PI * 2;
+    const n = 72;
+    for (let i = 0; i <= n; i++) {
+      const a = a0 + (a1 - a0) * (i / n);
+      arcLocal.push([Math.cos(a), Math.sin(a), a]);
+    }
+  }
+
+  const shots = [
+    { a: 0, b: 150, fig: "01", name: "CRYO CARRIER", line: "Gold wire bonds and the gate probe lock onto the perimeter pads." },
+    { a: 151, b: 300, fig: "02", name: "ARRAY DIVE", line: "A depicted 1.0 THz wave meets the uninterrupted graphene sheet." },
+    { a: 301, b: 510, fig: "03", name: "GAP MACRO", line: "Gate voltage shifts the Fermi level off the Dirac point and floods the gap." },
+    { a: 511, b: 750, fig: "04", name: "TRANSMISSION", line: "The conductive gap shorts the capacitor. Resonant transmission falls from 85% to 2%." },
+    { a: 751, b: 1020, fig: "05", name: "MODULATION", line: "A compressed megahertz square wave toggles the beam. The eye updates on the readout plane." }
+  ];
+
+  function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+  function lerp(a, b, t) { return a + (b - a) * t; }
+  function smooth(t) { t = clamp(t, 0, 1); return t * t * (3 - 2 * t); }
+  function easeOut(t) { t = clamp(t, 0, 1); return 1 - Math.pow(1 - t, 3); }
+  function rgba(hex, a) {
+    const n = parseInt(hex.slice(1), 16);
+    return "rgba(" + ((n >> 16) & 255) + "," + ((n >> 8) & 255) + "," + (n & 255) + "," + a + ")";
+  }
+  function shade(hex, k) {
+    const n = parseInt(hex.slice(1), 16);
+    const r = clamp(Math.round(((n >> 16) & 255) * k), 0, 255);
+    const g = clamp(Math.round(((n >> 8) & 255) * k), 0, 255);
+    const b = clamp(Math.round((n & 255) * k), 0, 255);
+    return "rgb(" + r + "," + g + "," + b + ")";
+  }
+  function ringCenter(i, j) { return [OX + i * PITCH, OY + j * PITCH]; }
+  function layerZ(part, ex) { return part.z + part.lift * ex; }
+  function shotAt(f) {
+    for (let i = shots.length - 1; i >= 0; i--) if (f >= shots[i].a) return shots[i];
+    return shots[0];
+  }
+  function timecode(f) {
+    const s = f / FPS;
+    const m = Math.floor(s / 60);
+    const sec = (s - m * 60).toFixed(1).padStart(4, "0");
+    return m + ":" + sec;
+  }
+
+  function physics(f) {
+    let vg = 0, T = 0.85, damp = 0, lc = 1, fill = 0;
+    if (f < 301) {
+      vg = 0; fill = 0; T = 0.85; lc = 1; damp = 0;
+    } else if (f <= 510) {
+      const u = smooth((f - 301) / (510 - 301));
+      vg = u; fill = u; T = 0.85; lc = 1; damp = u * 0.08;
+    } else if (f <= 750) {
+      vg = 1; fill = 1;
+      const u = smooth(clamp((f - 536) / 130, 0, 1));
+      T = lerp(0.85, 0.02, u);
+      lc = 1 - u;
+      damp = u;
+    } else {
+      const ph = ((f - 751) % 18) / 18;
+      const gateOn = ph < 0.5;
+      const into = (gateOn ? ph : ph - 0.5) * 18;
+      const edge = clamp(into / 2.2, 0, 1);
+      const level = gateOn ? edge : 1 - edge;
+      vg = level; fill = level;
+      T = lerp(0.85, 0.02, level);
+      lc = 1 - level;
+      damp = level;
+    }
+    return { vg, T, damp, lc, fill };
+  }
+
+  function pose(f) {
+    const gap = gapWorld(0);
+    const keys = [
+      [0, -0.62, 0.98, 9.4, 0.0, 0.0, 0.7, 1.15],
+      [100, -0.50, 0.96, 7.15, 0.08, 0.02, 0.30, 0.08],
+      [150, -0.42, 0.92, 6.45, 0.12, 0.06, 0.24, 0],
+      [300, 0.02, 1.47, 3.65, 0.0, 0.0, 0.58, 0],
+      [430, 0.48, 1.16, 0.78, gap.x, gap.y, gap.z, 0],
+      [510, 0.22, 1.12, 0.64, gap.x, gap.y, gap.z, 0],
+      [750, -0.04, 1.10, 0.70, gap.x, gap.y, gap.z, 0],
+      [1020, -0.78, 0.98, 9.15, -0.35, 0.05, 0.42, 0]
+    ];
+    if (f >= 751) {
+      const u = (f - 751) / (1020 - 751);
+      const dolly = easeOut(u);
+      const a = keys[6];
+      const b = keys[7];
+      const S = (a[1] - b[1]) + Math.PI * 2;
+      return {
+        yaw: a[1] - S * u,
+        pitch: lerp(a[2], b[2], dolly),
+        dist: lerp(a[3], b[3], dolly),
+        lx: lerp(a[4], b[4], dolly),
+        ly: lerp(a[5], b[5], dolly),
+        lz: lerp(a[6], b[6], dolly),
+        ex: 0
+      };
+    }
+    let i = 0;
+    while (i < keys.length - 1 && f > keys[i + 1][0]) i++;
+    const a = keys[i], b = keys[i + 1];
+    const t = smooth((f - a[0]) / Math.max(1, b[0] - a[0]));
+    return {
+      yaw: lerp(a[1], b[1], t),
+      pitch: lerp(a[2], b[2], t),
+      dist: lerp(a[3], b[3], t),
+      lx: lerp(a[4], b[4], t),
+      ly: lerp(a[5], b[5], t),
+      lz: lerp(a[6], b[6], t),
+      ex: lerp(a[7], b[7], t)
+    };
+  }
+
+  function gapWorld(ex) {
+    const [cx, cy] = ringCenter(FI, FJ);
+    return {
+      x: cx + Math.cos(GAP) * R,
+      y: cy + Math.sin(GAP) * R,
+      z: SZ + SLIFT * ex
+    };
+  }
+
+  function makeCam(f, w, h) {
+    const p = pose(f);
+    p.pitch = clamp(p.pitch, 0.35, 1.52);
+    p.w = w; p.h = h;
+    p.focal = h * 0.92;
+    return p;
+  }
+
+  function project(x, y, z, cam) {
+    const dx = x - cam.lx, dy = y - cam.ly, dz = z - cam.lz;
+    const cp = Math.cos(cam.pitch), sp = Math.sin(cam.pitch);
+    const cy = Math.cos(cam.yaw), sy = Math.sin(cam.yaw);
+    const fx = -cp * sy, fy = -cp * cy, fz = -sp;
+    let rx = -fy, ry = fx;
+    const rl = Math.hypot(rx, ry) || 1;
+    rx /= rl; ry /= rl; const rz = 0;
+    const ux = fy * rz - fz * ry;
+    const uy = fz * rx - fx * rz;
+    const uz = fx * ry - fy * rx;
+    const vx = dx * rx + dy * ry + dz * rz;
+    const vy = -(dx * ux + dy * uy + dz * uz);
+    const vz = dx * fx + dy * fy + dz * fz + cam.dist;
+    const s = cam.focal / Math.max(0.18, vz);
+    return { x: cam.w / 2 + vx * s, y: cam.h / 2 - vy * s, vz, s };
+  }
+
+  function faceNormalDot(pts, light) {
+    const ax = pts[1][0] - pts[0][0], ay = pts[1][1] - pts[0][1], az = pts[1][2] - pts[0][2];
+    const bx = pts[3][0] - pts[0][0], by = pts[3][1] - pts[0][1], bz = pts[3][2] - pts[0][2];
+    let nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx;
+    const l = Math.hypot(nx, ny, nz) || 1;
+    nx /= l; ny /= l; nz /= l;
+    if (nz < 0 || (Math.abs(nz) < 0.2 && ny < 0)) { nx *= -1; ny *= -1; nz *= -1; }
+    return nx * light[0] + ny * light[1] + nz * light[2];
+  }
+
+  function drawFace(cam, pts, color) {
+    const q = pts.map((p) => project(p[0], p[1], p[2], cam));
+    if (q.some((p) => p.vz < 0.2)) return -1;
+    ctx.beginPath();
+    ctx.moveTo(q[0].x, q[0].y);
+    for (let i = 1; i < q.length; i++) ctx.lineTo(q[i].x, q[i].y);
+    ctx.closePath();
+    ctx.fillStyle = color;
+    ctx.fill();
+    const z = (q[0].vz + q[1].vz + q[2].vz + q[3].vz) / 4;
+    return z;
+  }
+
+  function drawBox(cam, w, d, h, z, topHex, sideHex) {
+    const x0 = -w / 2, x1 = w / 2, y0 = -d / 2, y1 = d / 2;
+    const v = [
+      [x0, y0, z], [x1, y0, z], [x1, y1, z], [x0, y1, z],
+      [x0, y0, z + h], [x1, y0, z + h], [x1, y1, z + h], [x0, y1, z + h]
+    ];
+    const light = [-0.25, -0.35, 0.90];
+    const faces = [
+      { idx: [4, 5, 6, 7], hex: topHex },
+      { idx: [0, 1, 5, 4], hex: sideHex },
+      { idx: [1, 2, 6, 5], hex: sideHex },
+      { idx: [2, 3, 7, 6], hex: sideHex },
+      { idx: [3, 0, 4, 7], hex: sideHex }
+    ];
+    const drawn = faces.map((f) => {
+      const pts = f.idx.map((i) => v[i]);
+      const nd = faceNormalDot(pts, light);
+      const k = 0.55 + 0.62 * clamp(nd, 0, 1);
+      return { pts, color: shade(f.hex, k), z: (pts[0][2] + pts[2][2]) / 2 + (pts[0][1] + pts[2][1]) * 0.01 };
+    });
+    drawn.sort((a, b) => a.z - b.z);
+    drawn.forEach((f) => drawFace(cam, f.pts, f.color));
+    const rim = [v[4], v[5], v[6], v[7]].map((p) => project(p[0], p[1], p[2], cam));
+    if (rim.every((p) => p.vz > 0.2)) {
+      ctx.beginPath();
+      ctx.moveTo(rim[0].x, rim[0].y);
+      rim.forEach((p) => ctx.lineTo(p.x, p.y));
+      ctx.closePath();
+      ctx.strokeStyle = "rgba(232,225,214,0.28)";
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+  }
+
+  function poly(cam, pts, fill, stroke, width) {
+    const q = pts.map((p) => project(p[0], p[1], p[2], cam));
+    if (q.some((p) => p.vz < 0.15)) return null;
+    ctx.beginPath();
+    ctx.moveTo(q[0].x, q[0].y);
+    for (let i = 1; i < q.length; i++) ctx.lineTo(q[i].x, q[i].y);
+    if (fill) { ctx.closePath(); ctx.fillStyle = fill; ctx.fill(); }
+    if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = width || 1; ctx.stroke(); }
+    return q;
+  }
+
+  function drawBackdrop(w, h) {
+    ctx.fillStyle = C.void;
+    ctx.fillRect(0, 0, w, h);
+    const g = ctx.createRadialGradient(w * 0.5, h * 0.42, h * 0.1, w * 0.5, h * 0.45, h * 0.78);
+    g.addColorStop(0, "#12151c");
+    g.addColorStop(1, C.void);
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, w, h);
+  }
+
+  function drawFloor(cam) {
+    ctx.save();
+    ctx.strokeStyle = "rgba(231,225,214,0.045)";
+    ctx.lineWidth = 1;
+    for (let i = -7; i <= 7; i++) {
+      line3(cam, [i * 0.7, -5.2, 0], [i * 0.7, 5.2, 0]);
+      line3(cam, [-5.2, i * 0.7, 0], [5.2, i * 0.7, 0]);
+    }
+    ctx.restore();
+  }
+
+  function line3(cam, a, b, color, width) {
+    const p = project(a[0], a[1], a[2], cam);
+    const q = project(b[0], b[1], b[2], cam);
+    if (p.vz < 0.2 || q.vz < 0.2) return null;
+    ctx.beginPath();
+    ctx.moveTo(p.x, p.y);
+    ctx.lineTo(q.x, q.y);
+    if (color) ctx.strokeStyle = color;
+    if (width) ctx.lineWidth = width;
+    ctx.stroke();
+    return [p, q];
+  }
+
+  function drawScrews(cam, z) {
+    const spots = [[-2.85, -2.0], [2.85, -2.0], [-2.85, 2.0], [2.85, 2.0]];
+    spots.forEach(([x, y]) => {
+      const p = project(x, y, z, cam);
+      if (p.vz < 0.2 || p.s < 40) return;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, clamp(p.s * 0.045, 2, 7), 0, Math.PI * 2);
+      ctx.strokeStyle = "rgba(231,225,214,0.35)";
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    });
+  }
+
+  function drawStack(cam) {
+    const ex = cam.ex;
+    const car = stack.carrier;
+    const zc = layerZ(car, ex);
+    drawBox(cam, car.w, car.d, car.h, zc, C.carrier, "#10141A");
+    drawScrews(cam, zc + car.h + 0.001);
+    const gate = stack.gate;
+    drawBox(cam, gate.w, gate.d, gate.h, layerZ(gate, ex), "#142033", "#10192A");
+    const q = stack.quartz;
+    drawBox(cam, q.w, q.d, q.h, layerZ(q, ex), C.quartz, "#141B2C");
+    const si = stack.si;
+    drawBox(cam, si.w, si.d, si.h, layerZ(si, ex), C.si, "#090B10");
+    drawSiStreets(cam, si, ex);
+  }
+
+  function drawSiStreets(cam, si, ex) {
+    const z = layerZ(si, ex) + si.h + 0.004;
+    ctx.save();
+    ctx.strokeStyle = "rgba(154,163,181,0.16)";
+    ctx.lineWidth = 1;
+    const x0 = -si.w / 2 + 0.18, x1 = si.w / 2 - 0.18;
+    const y0 = -si.d / 2 + 0.16, y1 = si.d / 2 - 0.16;
+    for (let i = 0; i <= 4; i++) {
+      const y = lerp(y0, y1, i / 4);
+      line3(cam, [x0, y, z], [x1, y, z]);
+    }
+    for (let i = 0; i <= 6; i++) {
+      const x = lerp(x0, x1, i / 6);
+      line3(cam, [x, y0, z], [x, y1, z]);
+    }
+    ctx.restore();
+  }
+
+  function drawGraphene(cam, phys) {
+    const z = GZ + GLIFT * cam.ex;
+    const w = 3.15, d = 2.18;
+    const x0 = -w / 2, x1 = w / 2, y0 = -d / 2, y1 = d / 2;
+    const tint = 0.22 + phys.fill * 0.45;
+    poly(cam, [[x0, y0, z], [x1, y0, z], [x1, y1, z], [x0, y1, z]], rgba("#10151f", 0.72), rgba(C.gate, 0.18 + phys.fill * 0.55), 1.25);
+    const sample = project(0, 0, z, cam);
+    if (!sample || sample.s < 190) return;
+    const r = cam.dist < 2.2 ? 0.042 : 0.062;
+    const dx = Math.sqrt(3) * r;
+    const dy = 1.5 * r;
+    ctx.save();
+    ctx.strokeStyle = rgba(phys.fill > 0.05 ? C.gate : "#8FA0B8", 0.28 + phys.fill * 0.45);
+    ctx.lineWidth = cam.dist < 2.2 ? 1.1 : 0.8;
+    let row = 0;
+    for (let y = y0 + r; y < y1 - r * 0.4; y += dy, row++) {
+      const xoff = (row % 2) ? dx / 2 : 0;
+      for (let x = x0 + r + xoff; x < x1 - r * 0.2; x += dx) {
+        const pts = [];
+        for (let k = 0; k < 6; k++) {
+          const a = Math.PI / 6 + k * Math.PI / 3;
+          pts.push([x + Math.cos(a) * r, y + Math.sin(a) * r, z + 0.004]);
+        }
+        const q = pts.map((p) => project(p[0], p[1], p[2], cam));
+        if (q.some((p) => p.vz < 0.2)) continue;
+        ctx.beginPath();
+        ctx.moveTo(q[0].x, q[0].y);
+        for (let k = 1; k < 6; k++) ctx.lineTo(q[k].x, q[k].y);
+        ctx.closePath();
+        ctx.stroke();
+      }
+    }
+    ctx.restore();
+    void tint;
+  }
+
+  function drawPads(cam) {
+    const si = stack.si;
+    const z = layerZ(si, cam.ex) + si.h + 0.01;
+    const left = -si.w / 2 + 0.08;
+    const right = si.w / 2 - 0.08;
+    for (let i = 0; i < 4; i++) {
+      const y = lerp(-0.95, 0.95, i / 3);
+      pad(cam, left, y, z, 0.16, 0.11);
+    }
+    pad(cam, right, -0.34, z, 0.14, 0.2);
+    pad(cam, right, 0.0, z, 0.18, 0.16);
+    pad(cam, right, 0.34, z, 0.14, 0.2);
+  }
+
+  function pad(cam, x, y, z, w, d) {
+    poly(cam,
+      [[x - w / 2, y - d / 2, z], [x + w / 2, y - d / 2, z], [x + w / 2, y + d / 2, z], [x - w / 2, y + d / 2, z]],
+      C.gold, rgba(C.goldHi, 0.8), 1);
+  }
+
+  function drawRings(cam, phys) {
+    const z = SZ + SLIFT * cam.ex;
+    for (let j = 0; j < ROWS; j++) {
+      for (let i = 0; i < COLS; i++) {
+        const [cx, cy] = ringCenter(i, j);
+        const focus = i === FI && j === FJ;
+        drawOneRing(cam, cx, cy, z, phys, focus);
+      }
+    }
+  }
+
+  function drawOneRing(cam, cx, cy, z, phys, focus) {
+    const pts = arcLocal.map(([c, s]) => [cx + c * R, cy + s * R, z]);
+    const q = pts.map((p) => project(p[0], p[1], p[2], cam));
+    if (q.some((p) => p.vz < 0.2)) return;
+    const width = clamp(0.062 * q[0].s, 1.4, 26);
+    ctx.save();
+    ctx.lineCap = "butt";
+    ctx.lineJoin = "round";
+    ctx.beginPath();
+    ctx.moveTo(q[0].x, q[0].y);
+    for (let i = 1; i < q.length; i++) ctx.lineTo(q[i].x, q[i].y);
+    ctx.strokeStyle = rgba("#6a5428", 0.9);
+    ctx.lineWidth = width + 2.2;
+    ctx.stroke();
+    ctx.strokeStyle = C.gold;
+    ctx.lineWidth = width;
+    ctx.stroke();
+    ctx.strokeStyle = rgba(C.goldHi, 0.85);
+    ctx.lineWidth = Math.max(1, width * 0.28);
+    ctx.stroke();
+    if (phys.lc > 0.04) {
+      ctx.strokeStyle = rgba(C.amber, 0.22 + phys.lc * 0.55);
+      ctx.lineWidth = Math.max(1, width * 0.45);
+      ctx.globalCompositeOperation = "lighter";
+      ctx.stroke();
+      ctx.globalCompositeOperation = "source-over";
+    }
+    const capA = GAP - GH;
+    const capB = GAP + GH;
+    radialCap(cam, cx, cy, z, capA, width);
+    radialCap(cam, cx, cy, z, capB, width);
+    if (phys.damp > 0.28) {
+      const pa = project(cx + Math.cos(capA) * R, cy + Math.sin(capA) * R, z, cam);
+      const pb = project(cx + Math.cos(capB) * R, cy + Math.sin(capB) * R, z, cam);
+      if (pa.vz > 0.2 && pb.vz > 0.2) {
+        ctx.strokeStyle = rgba(C.ruby, 0.35 + 0.6 * phys.damp);
+        ctx.lineWidth = Math.max(2, width * (0.35 + 0.4 * phys.damp));
+        ctx.beginPath();
+        ctx.moveTo(pa.x, pa.y);
+        ctx.lineTo(pb.x, pb.y);
+        ctx.stroke();
+      }
+    }
+    const gm = project(cx + Math.cos(GAP) * R, cy + Math.sin(GAP) * R, z, cam);
+    const glowR = clamp(width * 2.4, 8, 70);
+    const grd = ctx.createRadialGradient(gm.x, gm.y, 0, gm.x, gm.y, glowR);
+    if (phys.damp > 0.2) {
+      grd.addColorStop(0, rgba(C.ruby, 0.55 * phys.damp));
+      grd.addColorStop(1, rgba(C.ruby, 0));
+    } else {
+      grd.addColorStop(0, rgba(C.amber, 0.28 * phys.lc));
+      grd.addColorStop(1, rgba(C.amber, 0));
+    }
+    ctx.globalCompositeOperation = "lighter";
+    ctx.fillStyle = grd;
+    ctx.beginPath();
+    ctx.arc(gm.x, gm.y, glowR, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalCompositeOperation = "source-over";
+    if (phys.lc > 0.08) {
+      const travel = (frame * 0.035) % 1;
+      for (let k = 0; k < 4; k++) {
+        const u = (travel + k / 4) % 1;
+        const idx = Math.floor(u * (arcLocal.length - 1));
+        const p = q[idx];
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, Math.max(1.5, width * 0.22), 0, Math.PI * 2);
+        ctx.fillStyle = rgba(C.amber, 0.35 + 0.6 * phys.lc);
+        ctx.fill();
+      }
+    }
+    if (focus) drawGapCarriers(cam, cx, cy, z, phys, width);
+    ctx.restore();
+  }
+
+  function radialCap(cam, cx, cy, z, ang, width) {
+    const a = [cx + Math.cos(ang) * (R - 0.045), cy + Math.sin(ang) * (R - 0.045), z];
+    const b = [cx + Math.cos(ang) * (R + 0.045), cy + Math.sin(ang) * (R + 0.045), z];
+    ctx.lineWidth = Math.max(2, width * 0.55);
+    ctx.strokeStyle = C.goldHi;
+    line3(cam, a, b);
+  }
+
+  function drawGapCarriers(cam, cx, cy, z, phys, width) {
+    if (phys.fill < 0.02 && phys.damp < 0.02) return;
+    const mid = project(cx + Math.cos(GAP) * R, cy + Math.sin(GAP) * R, z + 0.01, cam);
+    if (mid.vz > 0.2 && phys.fill > 0.04) {
+      const rad = Math.max(10, width * 1.15);
+      const g = ctx.createRadialGradient(mid.x, mid.y, 0, mid.x, mid.y, rad);
+      g.addColorStop(0, rgba(phys.damp > 0.55 ? C.ruby : C.gate, 0.28 * Math.max(phys.fill, phys.damp)));
+      g.addColorStop(1, rgba(C.gate, 0));
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.arc(mid.x, mid.y, rad, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    const nA = 7, nR = 5;
+    for (let i = 0; i < nR; i++) {
+      for (let j = 0; j < nA; j++) {
+        const ang = (GAP - GH) + ((j + 1) / (nA + 1)) * (2 * GH);
+        const rr = (R - 0.04) + (i / (nR - 1)) * 0.08;
+        const t = (i * nA + j) / (nA * nR - 1);
+        const on = phys.fill >= t * 0.92;
+        if (!on && phys.damp < 0.5) continue;
+        const p = project(cx + Math.cos(ang) * rr, cy + Math.sin(ang) * rr, z + 0.01, cam);
+        if (p.vz < 0.2) continue;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, Math.max(1.6, width * 0.16), 0, Math.PI * 2);
+        const mix = phys.damp;
+        ctx.fillStyle = mix > 0.65 ? rgba(C.ruby, 0.9) : rgba(C.gate, 0.35 + 0.65 * phys.fill);
+        ctx.fill();
+      }
+    }
+  }
+
+  function bondTrim(f, index) {
+    const start = 48 + index * 10;
+    return smooth(clamp((f - start) / 32, 0, 1));
+  }
+
+  function drawBonds(cam) {
+    const si = stack.si;
+    const zChip = layerZ(si, cam.ex) + si.h + 0.02;
+    const zOut = layerZ(stack.quartz, cam.ex) + stack.quartz.h;
+    for (let i = 0; i < 4; i++) {
+      const y = lerp(-0.95, 0.95, i / 3);
+      const trim = bondTrim(frame, i);
+      if (trim <= 0) continue;
+      const p0 = [-si.w / 2 + 0.08, y, zChip];
+      const p2 = [-2.55, y, zOut];
+      const p1 = [(p0[0] + p2[0]) / 2, y, Math.max(p0[2], p2[2]) + 0.62];
+      const n = 22;
+      const pts = [];
+      for (let k = 0; k <= n; k++) {
+        const t = (k / n) * trim;
+        const u = 1 - t;
+        pts.push([
+          u * u * p0[0] + 2 * u * t * p1[0] + t * t * p2[0],
+          u * u * p0[1] + 2 * u * t * p1[1] + t * t * p2[1],
+          u * u * p0[2] + 2 * u * t * p1[2] + t * t * p2[2]
+        ]);
+      }
+      const q = pts.map((p) => project(p[0], p[1], p[2], cam));
+      if (q.some((p) => p.vz < 0.2)) continue;
+      ctx.beginPath();
+      ctx.moveTo(q[0].x, q[0].y);
+      for (let k = 1; k < q.length; k++) ctx.lineTo(q[k].x, q[k].y);
+      ctx.strokeStyle = C.gold;
+      ctx.lineWidth = clamp(q[0].s * 0.018, 1.2, 4.5);
+      ctx.stroke();
+      [q[0], q[q.length - 1]].forEach((p) => {
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, clamp(q[0].s * 0.02, 2, 5.5), 0, Math.PI * 2);
+        ctx.fillStyle = C.goldHi;
+        ctx.fill();
+      });
+    }
+  }
+
+  function probeDrop(f) {
+    return smooth(clamp((f - 96) / 48, 0, 1));
+  }
+
+  function drawProbes(cam) {
+    const si = stack.si;
+    const zPad = layerZ(si, cam.ex) + si.h + 0.03;
+    const drop = probeDrop(frame);
+    const ys = [-0.34, 0.0, 0.34];
+    const headZ = lerp(2.15, zPad + 0.55, drop);
+    const tipZ = lerp(1.85, zPad, drop);
+    ys.forEach((y, idx) => {
+      const tip = [si.w / 2 - 0.02, y, tipZ];
+      const mid = [si.w / 2 + 0.85, y * 0.92, lerp(tipZ, headZ, 0.55)];
+      const tail = [si.w / 2 + 1.7, y * 0.8, headZ];
+      const parts = [tip, mid, tail];
+      ctx.lineWidth = idx === 1 ? 3.2 : 2.4;
+      ctx.strokeStyle = idx === 1 ? C.goldHi : "#C8CDD6";
+      line3(cam, parts[0], parts[1]);
+      line3(cam, parts[1], parts[2]);
+      const p = project(tip[0], tip[1], tip[2], cam);
+      if (p.vz > 0.2) {
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, idx === 1 ? 4 : 3, 0, Math.PI * 2);
+        ctx.fillStyle = C.gold;
+        ctx.fill();
+      }
+    });
+    const lock = clamp((frame - 142) / 14, 0, 1);
+    if (frame >= 142 && frame <= 168) {
+      const p = project(si.w / 2 - 0.02, 0, zPad, cam);
+      if (p.vz > 0.2) {
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 8 + lock * 26, 0, Math.PI * 2);
+        ctx.strokeStyle = rgba(C.bone, 1 - lock);
+        ctx.lineWidth = 1.25;
+        ctx.stroke();
+      }
+    }
+    const body = project(si.w / 2 + 1.7, 0, headZ, cam);
+    if (body.vz > 0.2) {
+      ctx.fillStyle = "#1C2430";
+      ctx.strokeStyle = "rgba(231,225,214,0.3)";
+      ctx.lineWidth = 1;
+      const rw = clamp(body.s * 0.18, 16, 42);
+      const rh = clamp(body.s * 0.1, 10, 22);
+      ctx.fillRect(body.x - rw / 2, body.y - rh / 2, rw, rh);
+      ctx.strokeRect(body.x - rw / 2, body.y - rh / 2, rw, rh);
+    }
+  }
+
+  function wavefront(cam, y, z, x0, x1, alpha, width) {
+    if (alpha < 0.02) return;
+    ctx.beginPath();
+    const n = 28;
+    for (let k = 0; k <= n; k++) {
+      const x = lerp(x0, x1, k / n);
+      const zz = z + Math.sin(k * 0.45 + frame * 0.05) * 0.008;
+      const p = project(x, y, zz, cam);
+      if (p.vz < 0.2) return;
+      if (k === 0) ctx.moveTo(p.x, p.y);
+      else ctx.lineTo(p.x, p.y);
+    }
+    ctx.strokeStyle = rgba(C.amber, alpha);
+    ctx.lineWidth = width;
+    ctx.stroke();
+  }
+
+  function drawBeam(cam, phys) {
+    if (frame < 151) return;
+    const z = SZ + SLIFT * cam.ex + 0.1;
+    const x0 = -1.2, x1 = 1.2;
+    const yIn1 = OY - 0.22;
+    const yOut0 = OY + (ROWS - 1) * PITCH + 0.22;
+    const lambda = 0.4;
+    const phase = (frame * 0.055) % lambda;
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    ctx.lineCap = "round";
+    for (let i = 0; i < 8; i++) {
+      const y = -3.2 + i * lambda + phase;
+      if (y > yIn1 - 0.02) continue;
+      const near = 1 - clamp((yIn1 - y) / 2.4, 0, 1);
+      wavefront(cam, y, z, x0, x1, 0.4 + near * 0.55, 2.1 + near * 1.8);
+    }
+    for (let i = 0; i < 7; i++) {
+      const y = yOut0 + 0.06 + i * lambda + phase;
+      if (y > 3.2) continue;
+      const fall = 1 - i / 7;
+      wavefront(cam, y, z, x0, x1, (0.18 + 0.8 * fall) * (phys.T / 0.85), 1.6 + 2.2 * (phys.T / 0.85));
+    }
+    ctx.restore();
+    if (frame >= 760) return;
+    const ay0 = project(x0 - 0.28, -2.35, z, cam);
+    const ay1 = project(x0 - 0.28, -1.2, z, cam);
+    if (ay0.vz > 0.2 && ay1.vz > 0.2) {
+      ctx.strokeStyle = C.amber;
+      ctx.fillStyle = C.amber;
+      ctx.lineWidth = 1.4;
+      ctx.beginPath();
+      ctx.moveTo(ay0.x, ay0.y);
+      ctx.lineTo(ay1.x, ay1.y);
+      ctx.stroke();
+      const ang = Math.atan2(ay1.y - ay0.y, ay1.x - ay0.x);
+      ctx.beginPath();
+      ctx.moveTo(ay1.x, ay1.y);
+      ctx.lineTo(ay1.x - Math.cos(ang - 0.4) * 9, ay1.y - Math.sin(ang - 0.4) * 9);
+      ctx.lineTo(ay1.x - Math.cos(ang + 0.4) * 9, ay1.y - Math.sin(ang + 0.4) * 9);
+      ctx.closePath();
+      ctx.fill();
+      ctx.font = "600 12px Inter, sans-serif";
+      ctx.textAlign = "left";
+      ctx.fillText("k   1.0 THz", ay0.x + 8, ay0.y + 4);
+    }
+  }
+
+  function drawFieldLines(cam, phys) {
+    if (phys.vg < 0.03 || frame < 301 || frame > 760) return;
+    const [cx, cy] = ringCenter(FI, FJ);
+    const z0 = layerZ(stack.gate, cam.ex) + stack.gate.h;
+    const z1 = SZ + SLIFT * cam.ex;
+    ctx.save();
+    ctx.strokeStyle = rgba(C.gate, 0.45 + 0.5 * phys.vg);
+    ctx.lineWidth = 2;
+    for (let i = -2; i <= 2; i++) {
+      const ang = GAP + i * 0.09;
+      const x = cx + Math.cos(ang) * R;
+      const y = cy + Math.sin(ang) * R;
+      const n = 16;
+      ctx.beginPath();
+      for (let k = 0; k <= n; k++) {
+        const t = k / n;
+        const zz = lerp(z0, z1, t);
+        const bow = Math.sin(t * Math.PI) * 0.08 * i;
+        const p = project(x + bow, y, zz, cam);
+        if (k === 0) ctx.moveTo(p.x, p.y);
+        else ctx.lineTo(p.x, p.y);
+      }
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function readoutCorners(ex) {
+    const c = [3.15, 0.15, 1.25 + ex * 0.2];
+    const hw = 1.05, hh = 0.78;
+    return [
+      [c[0], c[1] - hw, c[2] - hh],
+      [c[0], c[1] + hw, c[2] - hh],
+      [c[0], c[1] + hw, c[2] + hh],
+      [c[0], c[1] - hw, c[2] + hh]
+    ];
+  }
+
+  function bilerp(q, u, v) {
+    const x = (1 - u) * (1 - v) * q[0].x + u * (1 - v) * q[1].x + u * v * q[2].x + (1 - u) * v * q[3].x;
+    const y = (1 - u) * (1 - v) * q[0].y + u * (1 - v) * q[1].y + u * v * q[2].y + (1 - u) * v * q[3].y;
+    return { x, y };
+  }
+
+  function quadHealthy(q) {
+    const cross = (a, b, c) => (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+    const signs = [cross(q[0], q[1], q[2]), cross(q[1], q[2], q[3]), cross(q[2], q[3], q[0]), cross(q[3], q[0], q[1])];
+    const convex = signs.every((v) => v > 40) || signs.every((v) => v < -40);
+    const w = Math.hypot(q[1].x - q[0].x, q[1].y - q[0].y);
+    const h = Math.hypot(q[3].x - q[0].x, q[3].y - q[0].y);
+    return convex && w > 240 && h > 140 && w < 820 && h < 560;
+  }
+
+  function drawReadoutPlane(cam, phys) {
+    if (frame < 760) return null;
+    const corners = readoutCorners(cam.ex);
+    const q = corners.map((p) => project(p[0], p[1], p[2], cam));
+    if (q.some((p) => p.vz < 0.3)) return null;
+    const widthPx = Math.hypot(q[1].x - q[0].x, q[1].y - q[0].y);
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(q[0].x, q[0].y);
+    for (let i = 1; i < 4; i++) ctx.lineTo(q[i].x, q[i].y);
+    ctx.closePath();
+    ctx.fillStyle = "rgba(12,16,26,0.9)";
+    ctx.fill();
+    ctx.strokeStyle = "rgba(231,225,214,0.45)";
+    ctx.lineWidth = 1.25;
+    ctx.stroke();
+    const healthy = quadHealthy(q);
+    if (healthy) drawTracesOnQuad(q, phys, frame);
+    else if (widthPx > 80 && widthPx < 640) {
+      const mid = bilerp(q, 0.5, 0.58);
+      ctx.fillStyle = C.bone;
+      ctx.font = "600 12px Inter, sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText("READOUT", mid.x, mid.y);
+    }
+    ctx.restore();
+    return healthy ? widthPx : 0;
+  }
+
+  function gateLevel(f) {
+    if (f < 751) return physics(f).vg;
+    const ph = ((f - 751) % 18) / 18;
+    const gateOn = ph < 0.5;
+    const into = (gateOn ? ph : ph - 0.5) * 18;
+    const edge = clamp(into / 2.2, 0, 1);
+    return gateOn ? edge : 1 - edge;
+  }
+
+  function drawTracesOnQuad(q, phys, f) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(q[0].x, q[0].y);
+    q.forEach((p) => ctx.lineTo(p.x, p.y));
+    ctx.closePath();
+    ctx.clip();
+    const title = bilerp(q, 0.06, 0.9);
+    ctx.fillStyle = C.dim;
+    ctx.font = "500 11px Inter, sans-serif";
+    ctx.fillText("READOUT PLANE", title.x, title.y);
+    strokeUV(q, (u) => 0.78 + gateSquare(u) * 0.14, C.gate, 1.4, 48);
+    strokeUV(q, (u) => 0.16 + eyeOpen(u, false) * 0.42, rgba(C.amber, 0.95), 1.6, 56);
+    strokeUV(q, (u) => 0.16 + eyeOpen(u, true) * 0.42, rgba(C.amber, 0.55), 1.4, 56);
+    ctx.restore();
+    void phys;
+  }
+
+  function strokeUV(q, vAt, color, width, n) {
+    ctx.beginPath();
+    for (let i = 0; i <= n; i++) {
+      const u = 0.06 + 0.88 * (i / n);
+      const p = bilerp(q, u, vAt(i / n));
+      if (i === 0) ctx.moveTo(p.x, p.y);
+      else ctx.lineTo(p.x, p.y);
+    }
+    ctx.strokeStyle = color;
+    ctx.lineWidth = width;
+    ctx.stroke();
+  }
+
+  function drawExplodeKey(cam) {
+    if (cam.ex < 0.08) return;
+    const qz = stack.quartz, si = stack.si, car = stack.carrier;
+    const rows = [
+      [[car.w / 2 - 0.2, -car.d / 2 + 0.25, layerZ(car, cam.ex) + car.h], "CRYO CARRIER"],
+      [[qz.w / 2 - 0.12, -qz.d / 2 + 0.18, layerZ(qz, cam.ex) + qz.h], "QUARTZ ISOLATION BUFFER"],
+      [[si.w / 2 - 0.1, -si.d / 2 + 0.14, layerZ(si, cam.ex) + si.h], "HIGH-RESISTIVITY SILICON"],
+      [[1.4, -0.9, GZ + GLIFT * cam.ex], "MONOLAYER GRAPHENE"],
+      [[1.15, 0.75, SZ + SLIFT * cam.ex], "Au SPLIT-RING ARRAY"]
+    ];
+    const x = cam.w - 300;
+    rows.forEach((row, i) => {
+      const p = project(row[0][0], row[0][1], row[0][2], cam);
+      if (p.vz < 0.25) return;
+      const y = 150 + i * 34;
+      ctx.save();
+      ctx.strokeStyle = "rgba(231,225,214,0.7)";
+      ctx.fillStyle = C.bone;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(p.x, p.y);
+      ctx.lineTo(x - 8, y);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 2.2, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.font = "600 12px Inter, sans-serif";
+      ctx.textAlign = "left";
+      ctx.fillText(row[1], x, y + 4);
+      ctx.restore();
+    });
+  }
+
+  function drawCallouts(cam) {
+    const ex = cam.ex;
+    const items = [];
+    const s = shotAt(frame);
+    drawExplodeKey(cam);
+    if (s.fig === "01" && ex < 0.35 && frame > 70) {
+      const a = fadeWindow(frame, 80, 150, 16, 10);
+      items.push(mark(cam, [-2.2, 0.3, layerZ(stack.quartz, ex) + 0.7], "Au WIRE BOND", a));
+      items.push(mark(cam, [stack.si.w / 2 + 0.4, 0, layerZ(stack.si, ex) + 0.4], "GATE RF PROBE", a));
+      items.push(mark(cam, [0.2, -1.5, layerZ(stack.quartz, ex) + 0.05], "QUARTZ ISOLATION", a * 0.9));
+    }
+    if (s.fig === "02") {
+      const a = fadeWindow(frame, 175, 300, 18, 12);
+      const [cx, cy] = ringCenter(1, 2);
+      items.push(mark(cam, [cx, cy, SZ + 0.02], "SPLIT-RING RESONATOR", a));
+      items.push(mark(cam, [0, 0.95, GZ + 0.02], "GRAPHENE SHEET", a));
+    }
+    if ((s.fig === "03" || s.fig === "04") && cam.dist > 1.6) {
+      const a = fadeWindow(frame, 320, 750, 16, 12);
+      const g = gapWorld(ex);
+      items.push(mark(cam, [g.x, g.y, g.z], s.fig === "04" ? "PLASMONIC GAP DAMPING" : "CAPACITIVE SPLIT", a));
+    }
+    items.forEach((it) => { if (it) paintMark(it); });
+  }
+
+  function fadeWindow(f, a, b, inn, out) {
+    return Math.min(clamp((f - a) / inn, 0, 1), clamp((b - f) / out, 0, 1));
+  }
+
+  function mark(cam, world, text, alpha) {
+    if (alpha <= 0.02) return null;
+    const p = project(world[0], world[1], world[2], cam);
+    if (p.vz < 0.25) return null;
+    if (p.x < 40 || p.x > cam.w - 40 || p.y < 40 || p.y > cam.h - 40) return null;
+    return { x: p.x, y: p.y, text, alpha };
+  }
+
+  function paintMark(it) {
+    ctx.save();
+    ctx.globalAlpha = it.alpha;
+    const dir = it.x < ctx.canvas.width * 0.5 ? -1 : 1;
+    const tx = it.x + dir * 92;
+    const ty = it.y - 36;
+    ctx.strokeStyle = "rgba(231,225,214,0.75)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(it.x, it.y);
+    ctx.lineTo(it.x + dir * 16, it.y - 10);
+    ctx.lineTo(tx, ty);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(it.x, it.y, 2.2, 0, Math.PI * 2);
+    ctx.fillStyle = C.bone;
+    ctx.fill();
+    ctx.font = "600 11px Inter, sans-serif";
+    ctx.fillStyle = C.bone;
+    ctx.textAlign = dir < 0 ? "right" : "left";
+    ctx.fillText(it.text, tx + dir * 6, ty + 4);
+    ctx.restore();
+  }
+
+  function drawDirac(w, h, phys) {
+    if (frame < 301 || frame > 760) return;
+    const a = fadeWindow(frame, 310, 745, 16, 14);
+    const bw = 248, bh = 196;
+    const x = 24, y = h - bh - 168;
+    ctx.save();
+    ctx.globalAlpha = a;
+    ctx.fillStyle = "rgba(8,10,14,0.9)";
+    ctx.strokeStyle = "rgba(231,225,214,0.32)";
+    ctx.lineWidth = 1;
+    ctx.fillRect(x, y, bw, bh);
+    ctx.strokeRect(x, y, bw, bh);
+    ctx.fillStyle = C.dim;
+    ctx.font = "600 11px Inter, sans-serif";
+    ctx.textAlign = "left";
+    ctx.fillText("DIRAC CONE  ·  DEPICTED", x + 12, y + 20);
+    const ax = x + 86, ay = y + 108;
+    ctx.strokeStyle = "rgba(231,225,214,0.85)";
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    ctx.moveTo(ax - 48, ay - 46);
+    ctx.lineTo(ax, ay);
+    ctx.lineTo(ax + 48, ay - 46);
+    ctx.moveTo(ax - 40, ay + 36);
+    ctx.lineTo(ax, ay);
+    ctx.lineTo(ax + 40, ay + 36);
+    ctx.stroke();
+    const efY = ay - Math.max(0.08, phys.vg) * 40;
+    if (phys.vg > 0.04) {
+      ctx.fillStyle = rgba(C.gate, 0.2);
+      ctx.beginPath();
+      ctx.moveTo(ax, ay);
+      const half = 48 * ((ay - efY) / 46);
+      ctx.lineTo(ax - half, efY);
+      ctx.lineTo(ax + half, efY);
+      ctx.closePath();
+      ctx.fill();
+    }
+    ctx.strokeStyle = "rgba(231,225,214,0.9)";
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(ax - 48, ay - 46);
+    ctx.lineTo(ax, ay);
+    ctx.lineTo(ax + 48, ay - 46);
+    ctx.moveTo(ax - 40, ay + 36);
+    ctx.lineTo(ax, ay);
+    ctx.lineTo(ax + 40, ay + 36);
+    ctx.stroke();
+    ctx.strokeStyle = C.gate;
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    ctx.moveTo(ax - 54, efY);
+    ctx.lineTo(ax + 54, efY);
+    ctx.stroke();
+    ctx.fillStyle = C.gate;
+    ctx.font = "600 11px JetBrains Mono, monospace";
+    ctx.fillText("EF", ax + 58, efY + 4);
+    ctx.fillStyle = C.bone;
+    ctx.font = "600 10px Inter, sans-serif";
+    ctx.fillText("DIRAC", ax + 6, ay + 16);
+    ctx.fillStyle = C.dim;
+    ctx.font = "500 11px Inter, sans-serif";
+    const caption = phys.vg < 0.08 ? "Minimum conductivity" : "Carriers fill as EF leaves Dirac";
+    ctx.fillText(caption, x + 12, y + bh - 28);
+    ctx.font = "500 12px JetBrains Mono, monospace";
+    ctx.fillStyle = C.bone;
+    ctx.fillText("n  ∝  EF²", x + 12, y + bh - 12);
+    ctx.restore();
+  }
+
+  function drawHUD(w, h, phys, planeW) {
+    const shot = shotAt(frame);
+    ctx.save();
+    ctx.textAlign = "left";
+    ctx.fillStyle = C.dim;
+    ctx.font = "600 11px JetBrains Mono, monospace";
+    ctx.fillText("FIG  " + shot.fig + "   /   05", 28, 36);
+    ctx.fillStyle = C.bone;
+    ctx.font = "560 18px Inter, sans-serif";
+    ctx.fillText("Graphene terahertz amplitude modulator", 28, 62);
+    ctx.fillStyle = C.dim;
+    ctx.font = "500 13px Inter, sans-serif";
+    wrapText(shot.line, 28, 86, Math.min(640, w * 0.46), 18);
+
+    ctx.textAlign = "right";
+    ctx.font = "500 13px JetBrains Mono, monospace";
+    ctx.fillStyle = C.bone;
+    ctx.fillText(timecode(frame), w - 28, 40);
+    ctx.fillStyle = C.dim;
+    ctx.fillText(String(frame).padStart(4, "0") + "  /  1020", w - 28, 60);
+
+    drawLegend(h);
+    drawTimeline(w, h);
+
+    if (frame >= 301) {
+      const blockX = w - 250;
+      let by = 96;
+      meter(blockX, by, "GATE  V  /  VON", phys.vg, C.gate, "NORMALIZED");
+      by += 52;
+      meter(blockX, by, "FERMI SHIFT", phys.vg, C.gate, phys.vg < 0.08 ? "AT DIRAC" : "OFF DIRAC");
+      by += 52;
+      const tCol = phys.T < 0.4 ? C.ruby : C.amber;
+      meter(blockX, by, "TRANSMISSION", (phys.T - 0.02) / 0.83, tCol, Math.round(phys.T * 100) + "%");
+      if (frame >= 511 && frame <= 760) {
+        ctx.fillStyle = tCol;
+        ctx.font = "500 40px JetBrains Mono, monospace";
+        ctx.fillText(Math.round(phys.T * 100) + "%", w - 28, by + 118);
+        spark(blockX, by + 78, 210, 36);
+      }
+    }
+
+    const showHudEye = frame >= 751 && (!planeW || planeW < 280);
+    if (showHudEye) drawHudEye(w, h);
+
+    ctx.textAlign = "left";
+    ctx.font = "500 11px Inter, sans-serif";
+    ctx.fillStyle = "rgba(154,163,181,0.85)";
+    const note = "Scale and timebase are compressed. 85% to 2% is this jig's specified swing, not a named-device measurement.";
+    ctx.fillText(note, 28, h - 78);
+    ctx.restore();
+  }
+
+  function wrapText(text, x, y, max, lh) {
+    const words = text.split(" ");
+    let line = "";
+    let yy = y;
+    words.forEach((word) => {
+      const test = line ? line + " " + word : word;
+      if (ctx.measureText(test).width > max) {
+        ctx.fillText(line, x, yy);
+        line = word;
+        yy += lh;
+      } else line = test;
+    });
+    ctx.fillText(line, x, yy);
+  }
+
+  function meter(x, y, label, t, color, value) {
+    ctx.textAlign = "left";
+    ctx.fillStyle = C.dim;
+    ctx.font = "600 10px JetBrains Mono, monospace";
+    ctx.fillText(label, x, y);
+    ctx.textAlign = "right";
+    ctx.fillStyle = C.bone;
+    ctx.fillText(value, x + 210, y);
+    ctx.fillStyle = "rgba(231,225,214,0.12)";
+    ctx.fillRect(x, y + 8, 210, 4);
+    ctx.fillStyle = color;
+    ctx.fillRect(x, y + 8, 210 * clamp(t, 0, 1), 4);
+  }
+
+  function spark(x, y, w, h) {
+    ctx.save();
+    ctx.strokeStyle = "rgba(231,225,214,0.25)";
+    ctx.strokeRect(x, y, w, h);
+    ctx.beginPath();
+    const a = 511, b = Math.max(512, Math.min(frame, 750));
+    for (let f = a; f <= b; f += 2) {
+      const T = physics(f).T;
+      const px = x + ((f - 511) / (750 - 511)) * w;
+      const py = y + h - ((T - 0.02) / 0.83) * (h - 4) - 2;
+      if (f === a) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    }
+    ctx.strokeStyle = C.amber;
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawLegend(h) {
+    const rows = [["THz FIELD", C.amber], ["GATE / CARRIERS", C.gate], ["GAP DAMPING", C.ruby]];
+    ctx.textAlign = "left";
+    ctx.font = "600 10px JetBrains Mono, monospace";
+    rows.forEach((r, i) => {
+      const y = h - 132 - (2 - i) * 16;
+      ctx.fillStyle = r[1];
+      ctx.fillRect(28, y - 7, 10, 10);
+      ctx.fillStyle = C.dim;
+      ctx.fillText(r[0], 46, y + 2);
+    });
+  }
+
+  function drawTimeline(w, h) {
+    const x = 28, y = h - 48, bw = w - 56;
+    const spans = shots.map((s) => s.b - s.a + (s.a === 0 ? 0 : 0));
+    const total = 1020;
+    let cursor = x;
+    shots.forEach((s, i) => {
+      const seg = ((s.b - s.a) / total) * bw;
+      ctx.fillStyle = frame >= s.a && frame <= s.b ? "rgba(255,133,0,0.9)" : "rgba(231,225,214,0.16)";
+      ctx.fillRect(cursor, y, Math.max(2, seg - 4), 4);
+      ctx.fillStyle = frame >= s.a && frame <= s.b ? C.bone : C.dim;
+      ctx.font = "600 10px JetBrains Mono, monospace";
+      ctx.textAlign = "left";
+      ctx.fillText(s.fig, cursor, y + 18);
+      cursor += seg;
+    });
+    const px = x + (frame / total) * bw;
+    ctx.fillStyle = C.bone;
+    ctx.fillRect(px - 1, y - 4, 2, 12);
+  }
+
+  function gateSquare(ph) {
+    const gateOn = ph < 0.5;
+    const into = (gateOn ? ph : ph - 0.5) / 0.5;
+    const edge = clamp(into / 0.16, 0, 1);
+    return gateOn ? edge : 1 - edge;
+  }
+
+  function eyeOpen(u, invert) {
+    const ph = invert ? (u + 0.5) % 1 : u;
+    return 1 - gateSquare(ph);
+  }
+
+  function drawHudEye(w, h) {
+    const bw = 300, bh = 176;
+    const x = w - bw - 24, y = h - bh - 92;
+    const built = clamp((frame - 751) / 80, 0.35, 1);
+    ctx.save();
+    ctx.fillStyle = "rgba(8,10,14,0.9)";
+    ctx.strokeStyle = "rgba(231,225,214,0.35)";
+    ctx.fillRect(x, y, bw, bh);
+    ctx.strokeRect(x, y, bw, bh);
+    ctx.fillStyle = C.dim;
+    ctx.font = "600 11px Inter, sans-serif";
+    ctx.textAlign = "left";
+    ctx.fillText("READOUT PLANE  ·  IDEAL EYE", x + 12, y + 18);
+    ctx.font = "500 10px JetBrains Mono, monospace";
+    ctx.fillText("VG", x + 12, y + 40);
+    ctx.strokeStyle = C.gate;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    for (let i = 0; i <= 48; i++) {
+      const u = i / 48;
+      const px = x + 36 + u * (bw - 52);
+      const py = y + 48 - gateSquare(u) * 16;
+      if (i === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    }
+    ctx.stroke();
+    ctx.strokeStyle = "rgba(231,225,214,0.2)";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(x + 36, y + 64, bw - 52, 78);
+    [0.85, 0.02].forEach((T) => {
+      const py = y + 64 + 78 - ((T - 0.02) / 0.83) * 78;
+      ctx.fillStyle = C.dim;
+      ctx.fillText(Math.round(T * 100) + "%", x + 8, py + 3);
+    });
+    [false, true].forEach((invert, idx) => {
+      ctx.beginPath();
+      for (let i = 0; i <= 64; i++) {
+        const u = i / 64;
+        const open = eyeOpen(u, invert);
+        const px = x + 36 + u * (bw - 52);
+        const py = y + 64 + 78 - open * 78;
+        if (i === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+      }
+      ctx.strokeStyle = rgba(C.amber, (idx ? 0.45 : 0.95) * built);
+      ctx.lineWidth = 1.7;
+      ctx.stroke();
+    });
+    ctx.restore();
+  }
+
+  function drawVignette(w, h) {
+    const g = ctx.createRadialGradient(w / 2, h / 2, h * 0.45, w / 2, h / 2, h * 0.72);
+    g.addColorStop(0, "rgba(0,0,0,0)");
+    g.addColorStop(1, "rgba(0,0,0,0.45)");
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, w, h);
+    ctx.save();
+    ctx.globalAlpha = 0.18;
+    ctx.drawImage(noise, 0, 0, w, h);
+    ctx.restore();
+  }
+
+  function render() {
+    const rect = canvas.getBoundingClientRect();
+    const dpr = Math.min(2, devicePixelRatio || 1);
+    const w = Math.max(2, Math.round(rect.width * dpr));
+    const h = Math.max(2, Math.round(rect.height * dpr));
+    if (canvas.width !== w || canvas.height !== h) {
+      canvas.width = w;
+      canvas.height = h;
+    }
+    const cam = makeCam(frame, w, h);
+    const phys = physics(frame);
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
+    drawBackdrop(w, h);
+    drawFloor(cam);
+    drawStack(cam);
+    drawGraphene(cam, phys);
+    drawPads(cam);
+    drawBeam(cam, phys);
+    drawRings(cam, phys);
+    drawBonds(cam);
+    drawProbes(cam);
+    drawFieldLines(cam, phys);
+    const planeW = drawReadoutPlane(cam, phys);
+    drawCallouts(cam);
+    drawHUD(w, h, phys, planeW);
+    drawVignette(w, h);
+    drawDirac(w, h, phys);
+    const shot = shotAt(frame);
+    tcEl.textContent = timecode(frame) + "  ·  " + String(frame).padStart(4, "0");
+    scrub.value = String(frame);
+    playBtn.textContent = playing ? "Pause" : (frame >= TOTAL ? "Replay" : "Play");
+    playBtn.setAttribute("aria-pressed", playing ? "true" : "false");
+    document.querySelectorAll(".shot").forEach((btn) => {
+      const f0 = Number(btn.dataset.f);
+      const on = frame >= f0 && frame < (shots.find((s) => s.a === f0) || shots[4]).b + (f0 === 751 ? 1 : 0);
+      btn.setAttribute("aria-pressed", on && frame <= (shots.find((s) => s.a === f0).b) ? "true" : "false");
+    });
+    if (live.dataset.shot !== shot.fig) {
+      live.dataset.shot = shot.fig;
+      live.textContent = "Figure " + shot.fig + ". " + shot.name + ". " + shot.line;
+    }
+  }
+
+  function tick(now) {
+    if (!last) last = now;
+    const dt = Math.min(100, now - last);
+    last = now;
+    if (playing) {
+      acc += dt;
+      const step = 1000 / FPS;
+      while (acc >= step) {
+        acc -= step;
+        if (frame >= TOTAL) {
+          playing = false;
+          acc = 0;
+          if (exportRec && exportRec.state === "recording") exportRec.stop();
+          break;
+        }
+        frame += 1;
+      }
+    }
+    render();
+    requestAnimationFrame(tick);
+  }
+
+  playBtn.addEventListener("click", () => {
+    if (frame >= TOTAL) { frame = 0; playing = true; return; }
+    playing = !playing;
+  });
+  document.getElementById("replay").addEventListener("click", () => { frame = 0; playing = true; });
+  document.querySelectorAll(".shot").forEach((btn) => {
+    btn.addEventListener("click", () => { frame = Number(btn.dataset.f); playing = false; });
+  });
+  scrub.addEventListener("input", () => { frame = Number(scrub.value); playing = false; });
+  window.addEventListener("keydown", (e) => {
+    if (e.target.matches("input, button")) return;
+    if (e.code === "Space") { e.preventDefault(); playBtn.click(); }
+    if (e.code === "ArrowRight") { frame = Math.min(TOTAL, frame + (e.shiftKey ? 10 : 1)); playing = false; }
+    if (e.code === "ArrowLeft") { frame = Math.max(0, frame - (e.shiftKey ? 10 : 1)); playing = false; }
+    if (e.code === "Home") { frame = 0; playing = false; }
+    if (e.code === "End") { frame = TOTAL; playing = false; }
+    if (e.key >= "1" && e.key <= "5") { frame = shots[Number(e.key) - 1].a; playing = false; }
+  });
+  document.getElementById("export").addEventListener("click", () => {
+    if (typeof MediaRecorder === "undefined") return;
+    const stream = canvas.captureStream(FPS);
+    const mime = MediaRecorder.isTypeSupported("video/webm;codecs=vp9") ? "video/webm;codecs=vp9" : "video/webm";
+    exportRec = new MediaRecorder(stream, { mimeType: mime });
+    const chunks = [];
+    exportRec.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
+    exportRec.onstop = () => {
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(new Blob(chunks, { type: "video/webm" }));
+      a.download = "thz-graphene-modulator-jig-Cursor.webm";
+      a.click();
+    };
+    frame = 0;
+    playing = true;
+    exportRec.start();
+  });
+
+  window.__seek = (n) => { frame = clamp(Math.round(n), 0, TOTAL); playing = false; render(); };
+  window.__frame = () => frame;
+
+  if (reduce && !params.has("frame")) frame = 420;
+  render();
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>
