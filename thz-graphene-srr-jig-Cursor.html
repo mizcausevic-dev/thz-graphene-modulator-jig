@@ -1,0 +1,1248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Graphene split-ring terahertz modulator · anatomy jig</title>
+<style>
+  :root {
+    --ink: #07080b;
+    --panel: #10141c;
+    --line: #2a3548;
+    --bone: #e7e1d6;
+    --mute: #8b95a6;
+    --amber: #ff8500;
+    --blue: #3a86ff;
+    --ruby: #e63946;
+    --gold: #e0b85a;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    height: 100%;
+    background: var(--ink);
+    color: var(--bone);
+    font-family: Inter, "Liberation Sans", sans-serif;
+  }
+  canvas {
+    display: block;
+    width: 100vw;
+    height: calc(100vh - 96px);
+    cursor: crosshair;
+  }
+  #transport {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    gap: 14px;
+    align-items: center;
+    padding: 10px 18px 12px;
+    background: #07080b;
+    border-top: 1px solid var(--line);
+    z-index: 2;
+  }
+  button {
+    appearance: none;
+    background: #141a24;
+    color: var(--bone);
+    border: 1px solid var(--line);
+    font: 600 12px/1 JetBrains Mono, "Liberation Mono", monospace;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    padding: 10px 14px;
+    min-width: 84px;
+    cursor: pointer;
+  }
+  button:hover { border-color: var(--amber); color: white; }
+  button:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }
+  #scrub {
+    width: 100%;
+    accent-color: var(--amber);
+    cursor: pointer;
+  }
+  #readout {
+    font: 12px/1.4 JetBrains Mono, "Liberation Mono", monospace;
+    color: var(--mute);
+    text-align: right;
+    min-width: 220px;
+  }
+  #readout b { color: var(--bone); font-weight: 500; }
+  .shots {
+    grid-column: 1 / -1;
+    display: grid;
+    grid-template-columns: 150fr 150fr 210fr 240fr 270fr;
+    gap: 4px;
+    margin-top: -4px;
+  }
+  .shots span {
+    font: 10px/1.2 JetBrains Mono, monospace;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: #667084;
+    border-top: 2px solid #243044;
+    padding-top: 4px;
+  }
+  .shots span.on { color: var(--amber); border-top-color: var(--amber); }
+  @media (max-width: 800px) {
+    #transport { grid-template-columns: auto 1fr; }
+    #readout { grid-column: 1 / -1; text-align: left; min-width: 0; }
+    .shots span { font-size: 8px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    * { scroll-behavior: auto; }
+  }
+</style>
+</head>
+<body>
+<canvas id="view" aria-label="Anatomy animation of a monolayer graphene split-ring terahertz amplitude modulator"></canvas>
+<div id="transport">
+  <button id="play" type="button">Play</button>
+  <input id="scrub" type="range" min="0" max="1020" step="1" value="0" aria-label="Frame scrubber">
+  <div id="readout"><b>00:00.00</b> · f0000 / 1020</div>
+  <div class="shots" aria-hidden="true">
+    <span data-shot="0">0 Carrier</span>
+    <span data-shot="1">5s Array</span>
+    <span data-shot="2">10s Fermi</span>
+    <span data-shot="3">17s Collapse</span>
+    <span data-shot="4">25s Modulation</span>
+  </div>
+</div>
+<script>
+'use strict';
+
+const TOTAL = 1020;
+const FPS = 30;
+const PAL = {
+  ink: '#07080b',
+  si: '#0c0e14',
+  quartz: '#1a2234',
+  bone: '#e7e1d6',
+  mute: '#8b95a6',
+  amber: '#ff8500',
+  blue: '#3a86ff',
+  ruby: '#e63946',
+  gold: '#e4c16a',
+  goldDeep: '#8d6a2e',
+  carrier: '#121820',
+  graphene: '#161d2a'
+};
+
+const CHIP = 5.2;
+const C = 4.8;
+const AP = 2.28;
+const SI_H = 0.40;
+const Q_H = 0.12;
+const G_H = 0.016;
+const AU = 0.034;
+const Z0 = 0.04;
+const ZQ = Z0 + SI_H;
+const ZG = ZQ + Q_H;
+const ZA = ZG + G_H;
+const PITCH = 0.84;
+const ROUT = 0.31;
+const ARM = 0.078;
+const GAP = 0.060;
+const HERO = { x: 0, y: 0 };
+
+const canvas = document.getElementById('view');
+const ctx = canvas.getContext('2d');
+const playBtn = document.getElementById('play');
+const scrub = document.getElementById('scrub');
+const readout = document.getElementById('readout');
+const shotEls = Array.from(document.querySelectorAll('.shots span'));
+
+const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+const qFrame = new URLSearchParams(location.search).get('frame');
+let playing = !reduce && qFrame === null;
+let time = qFrame === null ? 0 : Math.max(0, Math.min(TOTAL, Number(qFrame))) / FPS;
+let lastTick = 0;
+
+const RINGS = [];
+for (let iy = -2; iy <= 2; iy++) {
+  for (let ix = -2; ix <= 2; ix++) {
+    RINGS.push({ x: ix * PITCH, y: iy * PITCH, hero: ix === 0 && iy === 0 });
+  }
+}
+
+function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+function lerp(a, b, t) { return a + (b - a) * t; }
+function smooth(t) { t = clamp(t, 0, 1); return t * t * (3 - 2 * t); }
+function ease(t) {
+  t = clamp(t, 0, 1);
+  return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+}
+function hash(a, b) {
+  const x = Math.sin(a * 127.1 + b * 311.7) * 43758.5453;
+  return x - Math.floor(x);
+}
+function sub(a, b) { return { x: a.x - b.x, y: a.y - b.y, z: a.z - b.z }; }
+function dot(a, b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+function cross(a, b) {
+  return { x: a.y * b.z - a.z * b.y, y: a.z * b.x - a.x * b.z, z: a.x * b.y - a.y * b.x };
+}
+function len(a) { return Math.hypot(a.x, a.y, a.z); }
+function norm(a) {
+  const l = len(a) || 1;
+  return { x: a.x / l, y: a.y / l, z: a.z / l };
+}
+function hexToRgb(hex) {
+  return [parseInt(hex.slice(1, 3), 16), parseInt(hex.slice(3, 5), 16), parseInt(hex.slice(5, 7), 16)];
+}
+function tone(hex, k) {
+  const [r, g, b] = hexToRgb(hex);
+  const c = (v) => clamp(Math.round(v * k), 0, 255);
+  return 'rgb(' + c(r) + ',' + c(g) + ',' + c(b) + ')';
+}
+function rgba(hex, a) {
+  const [r, g, b] = hexToRgb(hex);
+  return 'rgba(' + r + ',' + g + ',' + b + ',' + a + ')';
+}
+
+function shotOf(f) {
+  if (f < 150) return 0;
+  if (f < 300) return 1;
+  if (f < 510) return 2;
+  if (f < 750) return 3;
+  return 4;
+}
+
+function gateLevel(f) {
+  if (f < 330) return 0;
+  if (f < 500) return smooth((f - 330) / 160);
+  if (f < 751) return 1;
+  const period = 64;
+  const u = ((f - 751) % period) / period;
+  const edge = 0.12;
+  const half = 0.5;
+  if (u < half - edge) return 1;
+  if (u < half + edge) return 1 - smooth((u - (half - edge)) / (2 * edge));
+  if (u < 1 - edge) return 0;
+  return smooth((u - (1 - edge)) / edge);
+}
+
+function collapseAmount(f) {
+  if (f < 511) return 0;
+  if (f >= 750) return 1;
+  const t = (f - 511) / (750 - 511);
+  return 1 - Math.exp(-6.2 * Math.pow(t, 1.25));
+}
+
+function signals(f) {
+  const arrived = smooth(clamp((f - 165) / 110, 0, 1));
+  const g = gateLevel(f);
+  let T;
+  let resonance;
+  if (f < 511) {
+    T = 0.85;
+    resonance = arrived;
+  } else if (f < 751) {
+    const c = collapseAmount(f);
+    const ring = Math.exp(-4.5 * c) * Math.cos(c * 16);
+    T = lerp(0.85, 0.02, c);
+    resonance = clamp((1 - c) * (0.85 + 0.15 * ring), 0, 1) * Math.max(arrived, 1);
+  } else {
+    const s = smooth(g);
+    T = lerp(0.85, 0.02, s);
+    resonance = (1 - s) * arrived;
+  }
+  const ruby = (f >= 500 && f < 680)
+    ? resonance * 0.45 + Math.sin(Math.PI * clamp((f - 505) / 150, 0, 1)) * Math.exp(-3 * clamp((f - 505) / 160, 0, 1)) * 0.7
+    : resonance * 0.5;
+  return { arrived, gate: g, T, resonance, ruby, ef: Math.sqrt(clamp(g, 0, 1)) };
+}
+
+function cameraAt(f) {
+  const gap = { x: HERO.x + ROUT - ARM * 0.5, y: HERO.y, z: ZA + 0.02 };
+  const wide = { x: 0.15, y: -0.1, z: 0.55 };
+  const arrayLook = { x: 0, y: 0, z: ZA };
+  if (f <= 150) {
+    const u = f / 150;
+    return {
+      az: lerp(48, 36, u),
+      el: lerp(27, 24, u),
+      dist: lerp(3.55, 3.25, u),
+      look: wide
+    };
+  }
+  if (f <= 300) {
+    const u = ease((f - 150) / 150);
+    return {
+      az: lerp(36, 0.2, u),
+      el: lerp(24, 89.4, u),
+      dist: lerp(3.25, 2.85, u),
+      look: {
+        x: lerp(wide.x, arrayLook.x, u),
+        y: lerp(wide.y, arrayLook.y, u),
+        z: lerp(wide.z, arrayLook.z, u)
+      }
+    };
+  }
+  if (f <= 510) {
+    const u = ease((f - 300) / 210);
+    const a = {
+      x: lerp(arrayLook.x, gap.x, u),
+      y: lerp(arrayLook.y, gap.y, u),
+      z: lerp(arrayLook.z, gap.z, u)
+    };
+    return { az: lerp(0.2, 28, u), el: lerp(89.4, 58, u), dist: lerp(2.85, 0.46, u), look: a };
+  }
+  if (f <= 750) {
+    const u = (f - 510) / 240;
+    return {
+      az: lerp(28, 38, u),
+      el: lerp(58, 52, u),
+      dist: lerp(0.46, 0.5, u),
+      look: gap
+    };
+  }
+  const u = (f - 750) / 270;
+  const eu = ease(u);
+  const lookU = smooth(clamp((f - 750) / 80, 0, 1));
+  return {
+    az: 38 + ease(u) * 360,
+    el: lerp(52, 26, eu),
+    dist: lerp(0.5, 4.15, eu),
+    look: {
+      x: lerp(gap.x, 0.2, lookU),
+      y: lerp(gap.y, -0.15, lookU),
+      z: lerp(gap.z, 0.6, lookU)
+    }
+  };
+}
+
+function eyeOf(cam) {
+  const az = cam.az * Math.PI / 180;
+  const el = cam.el * Math.PI / 180;
+  return {
+    x: cam.look.x + cam.dist * Math.cos(el) * Math.sin(az),
+    y: cam.look.y + cam.dist * Math.cos(el) * Math.cos(az),
+    z: cam.look.z + cam.dist * Math.sin(el)
+  };
+}
+
+function frameOf(cam, eye) {
+  const back = norm(sub(eye, cam.look));
+  let xaxis = cross({ x: 0, y: 0, z: 1 }, back);
+  if (len(xaxis) < 0.05) {
+    const az = cam.az * Math.PI / 180;
+    xaxis = { x: Math.cos(az), y: Math.sin(az), z: 0 };
+  } else xaxis = norm(xaxis);
+  const yaxis = norm(cross(back, xaxis));
+  return { eye, back, xaxis, yaxis };
+}
+
+function project(p, fr, zoom, w, h) {
+  const d = sub(p, fr.look);
+  return {
+    x: w * 0.5 + dot(d, fr.xaxis) * zoom,
+    y: h * 0.5 - dot(d, fr.yaxis) * zoom,
+    depth: -dot(sub(p, fr.eye), fr.back)
+  };
+}
+
+function inGold(x, y, cx, cy) {
+  const lx = x - cx;
+  const ly = y - cy;
+  if (Math.abs(lx) > ROUT || Math.abs(ly) > ROUT) return false;
+  if (Math.abs(lx) < ROUT - ARM && Math.abs(ly) < ROUT - ARM) return false;
+  if (lx > ROUT - ARM && Math.abs(ly) < GAP) return false;
+  return true;
+}
+
+function ringPoint(cx, cy, u) {
+  const half = ROUT - ARM * 0.5;
+  const side = half * 2;
+  const gapLen = GAP * 2;
+  const path = side * 4 - gapLen;
+  let d = ((u % 1) + 1) % 1 * path;
+  const x0 = cx - half;
+  const x1 = cx + half;
+  const y0 = cy - half;
+  const y1 = cy + half;
+  const east = side - gapLen;
+  const upper = (side - gapLen) * 0.5;
+  if (d < upper) {
+    return { x: x1, y: cy + GAP + d, z: ZA + AU * 0.55 };
+  }
+  d -= upper;
+  if (d < side) return { x: x1 - d, y: y1, z: ZA + AU * 0.55 };
+  d -= side;
+  if (d < side) return { x: x0, y: y1 - d, z: ZA + AU * 0.55 };
+  d -= side;
+  if (d < side) return { x: x0 + d, y: y0, z: ZA + AU * 0.55 };
+  d -= side;
+  return { x: x1, y: y0 + d, z: ZA + AU * 0.55 };
+}
+
+function build(f, fr, zoom, w, h) {
+  const sig = signals(f);
+  const drawables = [];
+  const eye = fr.eye;
+
+  function pushFace(pts, normal, color, alpha) {
+    const c = {
+      x: (pts[0].x + pts[1].x + pts[2].x + pts[3].x) / 4,
+      y: (pts[0].y + pts[1].y + pts[2].y + pts[3].y) / 4,
+      z: (pts[0].z + pts[1].z + pts[2].z + pts[3].z) / 4
+    };
+    const toEye = sub(eye, c);
+    if (dot(normal, toEye) <= 0.0001) return;
+    const nd = dot(normal, norm({ x: -0.42, y: -0.38, z: 0.82 }));
+    const k = 0.62 + 0.46 * Math.max(0, nd);
+    const sp = pts.map((p) => project(p, fr, zoom, w, h));
+    const depth = (sp[0].depth + sp[1].depth + sp[2].depth + sp[3].depth) / 4;
+    drawables.push({
+      depth,
+      alpha: alpha == null ? 1 : alpha,
+      color: tone(color, k),
+      pts: sp,
+      kind: 'face'
+    });
+  }
+
+  function box(x0, y0, z0, x1, y1, z1, col, alpha) {
+    const p = [
+      { x: x0, y: y0, z: z0 }, { x: x1, y: y0, z: z0 }, { x: x1, y: y1, z: z0 }, { x: x0, y: y1, z: z0 },
+      { x: x0, y: y0, z: z1 }, { x: x1, y: y0, z: z1 }, { x: x1, y: y1, z: z1 }, { x: x0, y: y1, z: z1 }
+    ];
+    const faces = [
+      [[4, 5, 6, 7], { x: 0, y: 0, z: 1 }, col.z || col],
+      [[1, 0, 3, 2], { x: 0, y: 0, z: -1 }, col.nz || col.z || col],
+      [[5, 1, 2, 6], { x: 1, y: 0, z: 0 }, col.x || col],
+      [[0, 4, 7, 3], { x: -1, y: 0, z: 0 }, col.x || col],
+      [[7, 6, 2, 3], { x: 0, y: 1, z: 0 }, col.y || col],
+      [[4, 0, 1, 5], { x: 0, y: -1, z: 0 }, col.y || col]
+    ];
+    for (const face of faces) {
+      pushFace(face[0].map((i) => p[i]), face[1], face[2], alpha);
+    }
+  }
+
+  const half = CHIP / 2;
+  box(-C, AP, -0.62, C, C, 0, { z: '#1a222c', x: PAL.carrier, y: '#0e141c', nz: '#0a0d12' });
+  box(-C, -C, -0.62, C, -AP, 0, { z: '#1a222c', x: PAL.carrier, y: '#0e141c', nz: '#0a0d12' });
+  box(-C, -AP, -0.62, -AP, AP, 0, { z: '#1a222c', x: PAL.carrier, y: '#0e141c', nz: '#0a0d12' });
+  box(AP, -AP, -0.62, C, AP, 0, { z: '#1a222c', x: PAL.carrier, y: '#0e141c', nz: '#0a0d12' });
+  box(-AP + 0.08, -AP + 0.08, -0.64, AP - 0.08, AP - 0.08, -0.62, { z: '#05060a', x: '#05060a', y: '#05060a', nz: '#05060a' });
+
+  box(-half, -half, Z0, half, half, ZQ, { z: '#141820', x: PAL.si, y: '#0a0c12', nz: PAL.si });
+  box(-half, -half, ZQ, half, half, ZG, { z: PAL.quartz, x: '#31425f', y: '#31425f', nz: '#121822' });
+  box(-half, -half, ZG, half, half, ZA, { z: PAL.graphene, x: '#3d4c63', y: '#2c3a4e', nz: '#121820' });
+
+  const gold = { z: '#f0d48a', x: '#b8893c', y: '#a07732', nz: '#6e5424' };
+  for (const r of RINGS) {
+    const x0 = r.x - ROUT;
+    const x1 = r.x + ROUT;
+    const y0 = r.y - ROUT;
+    const y1 = r.y + ROUT;
+    const xi = r.x - (ROUT - ARM);
+    const xo = r.x + (ROUT - ARM);
+    const yi = r.y - (ROUT - ARM);
+    const yo = r.y + (ROUT - ARM);
+    box(x0, yo, ZA, x1, y1, ZA + AU, gold);
+    box(x0, y0, ZA, x1, yi, ZA + AU, gold);
+    box(x0, yi, ZA, xi, yo, ZA + AU, gold);
+    box(xo, r.y + GAP, ZA, x1, yo, ZA + AU, gold);
+    box(xo, yi, ZA, x1, r.y - GAP, ZA + AU, gold);
+  }
+
+  const pads = [
+    { x: half - 0.28, y: -0.42, tag: 'G' },
+    { x: half - 0.28, y: 0, tag: 'S' },
+    { x: half - 0.28, y: 0.42, tag: 'G' }
+  ];
+  for (const p of pads) {
+    box(p.x - 0.16, p.y - 0.12, ZA, p.x + 0.16, p.y + 0.12, ZA + 0.02, gold);
+  }
+  box(-half + 0.08, -0.16, Z0 + 0.02, -half + 0.16, 0.16, ZG, { z: '#8eb6ff', x: PAL.blue, y: '#2a62c4', nz: '#1a3f88' });
+
+  function stroke(points, color, width, alpha) {
+    const sp = points.map((p) => project(p, fr, zoom, w, h));
+    const depth = sp.reduce((s, p) => s + p.depth, 0) / sp.length;
+    drawables.push({ depth, kind: 'stroke', pts: sp, color, width, alpha });
+  }
+
+  const posts = [
+    { x: half + 0.85, y: -0.42 },
+    { x: half + 0.85, y: 0 },
+    { x: half + 0.85, y: 0.42 },
+    { x: -half - 0.7, y: 0 }
+  ];
+  posts.forEach((post) => {
+    box(post.x - 0.08, post.y - 0.08, 0, post.x + 0.08, post.y + 0.08, 0.06, gold);
+  });
+
+  function arch(a, b, lift) {
+    const pts = [];
+    for (let i = 0; i <= 18; i++) {
+      const t = i / 18;
+      pts.push({
+        x: lerp(a.x, b.x, t),
+        y: lerp(a.y, b.y, t),
+        z: lerp(a.z, b.z, t) + Math.sin(Math.PI * t) * lift
+      });
+    }
+    return pts;
+  }
+  pads.forEach((p, i) => {
+    stroke(arch(
+      { x: p.x + 0.12, y: p.y, z: ZA + 0.03 },
+      { x: posts[i].x, y: posts[i].y, z: 0.06 },
+      0.72
+    ), PAL.gold, 2.1, 1);
+  });
+  stroke(arch(
+    { x: -half + 0.12, y: 0, z: ZQ },
+    { x: posts[3].x, y: posts[3].y, z: 0.06 },
+    0.66
+  ), '#9ec0ff', 2.1, 1);
+
+  const camNow = cameraAt(f);
+  const seat = f < 28 ? 0 : f > 118 ? 1 : ease((f - 28) / 90);
+  const probeAlpha = 1 - smooth(clamp((camNow.el - 62) / 20, 0, 1));
+  pads.forEach((p) => {
+    const hover = 1 - seat;
+    const tip = { x: p.x + hover * 1.7, y: p.y, z: ZA + 0.012 + hover * 0.95 };
+    const tail = { x: half + 1.05, y: p.y, z: ZA + 0.62 };
+    const mid = { x: lerp(tip.x, tail.x, 0.45), y: lerp(tip.y, tail.y, 0.45), z: lerp(tip.z, tail.z, 0.35) + 0.15 };
+    if (probeAlpha > 0.04) {
+      stroke([tip, mid, tail], '#d5d8df', p.tag === 'S' ? 2.4 : 1.7, probeAlpha);
+      const mark = project(tip, fr, zoom, w, h);
+      drawables.push({ depth: mark.depth - 0.01, kind: 'tip', at: mark, hot: seat > 0.92 && f < 140, signal: p.tag === 'S', alpha: probeAlpha });
+    }
+  });
+
+  const sheetFade = (1 - smooth(clamp((camNow.el - 36) / 28, 0, 1))) * smooth(clamp((camNow.dist - 0.8) / 0.7, 0, 1));
+  if (sig.arrived > 0.02 && sheetFade > 0.04 && f < 340) {
+    const drop = smooth(clamp((f - 155) / 130, 0, 1));
+    const zHi = lerp(ZA + 2.8, ZA + 0.85, drop);
+    const zLo = ZA + 0.22;
+    const sheets = 5;
+    for (let i = 0; i < sheets; i++) {
+      const z = lerp(zLo, zHi, i / (sheets - 1));
+      const phase = 0.5 + 0.5 * Math.sin(z * 5.5 - f * 0.5);
+      const a = sig.arrived * sheetFade * (0.028 + 0.04 * phase);
+      box(-1.85, -1.85, z, 1.85, 1.85, z + 0.018, {
+        z: PAL.amber, x: PAL.amber, y: PAL.amber, nz: PAL.amber
+      }, a);
+    }
+  }
+
+  drawables.sort((a, b) => b.depth - a.depth);
+  return { drawables, sig, pads, seat };
+}
+
+function tracePoly(pts) {
+  ctx.beginPath();
+  ctx.moveTo(pts[0].x, pts[0].y);
+  for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+  ctx.closePath();
+}
+
+function drawScene(pack) {
+  for (const d of pack.drawables) {
+    if (d.kind === 'face') {
+      ctx.globalAlpha = d.alpha;
+      ctx.fillStyle = d.color;
+      tracePoly(d.pts);
+      ctx.fill();
+      ctx.globalAlpha = Math.min(1, d.alpha);
+      ctx.strokeStyle = 'rgba(255,255,255,0.05)';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    } else if (d.kind === 'stroke') {
+      ctx.beginPath();
+      ctx.moveTo(d.pts[0].x, d.pts[0].y);
+      for (let i = 1; i < d.pts.length; i++) ctx.lineTo(d.pts[i].x, d.pts[i].y);
+      ctx.strokeStyle = rgba(d.color, d.alpha);
+      ctx.lineWidth = d.width;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.stroke();
+    } else if (d.kind === 'tip') {
+      ctx.beginPath();
+      ctx.arc(d.at.x, d.at.y, d.hot ? 5 : 3.2, 0, Math.PI * 2);
+      ctx.fillStyle = d.hot ? '#fff4d4' : '#f2f4f7';
+      ctx.fill();
+    }
+  }
+}
+
+function drawLattice(f, fr, zoom, w, h, sig) {
+  if (zoom < 70) return;
+  const fine = zoom > 480;
+  const b = fine ? 0.0115 : 0.072;
+  const reach = fine ? Math.max(0.55, 900 / zoom) : CHIP * 0.48;
+  const cx = fine ? HERO.x + ROUT - ARM * 0.5 : 0;
+  const cy = fine ? HERO.y : 0;
+  ctx.save();
+  ctx.lineWidth = fine ? 1 : 0.8;
+  ctx.strokeStyle = fine ? 'rgba(196,210,230,0.55)' : 'rgba(150,168,196,0.28)';
+  ctx.beginPath();
+  const v1x = b * 1.5;
+  const v1y = b * Math.sqrt(3) / 2;
+  const v2x = b * 1.5;
+  const v2y = -b * Math.sqrt(3) / 2;
+  const nbs = [
+    { x: b, y: 0 },
+    { x: -b / 2, y: (b * Math.sqrt(3)) / 2 },
+    { x: -b / 2, y: (-b * Math.sqrt(3)) / 2 }
+  ];
+  const cols = Math.ceil(reach * 2 / v1x) + 2;
+  const rows = Math.ceil(reach * 2 / (b * Math.sqrt(3))) + 2;
+  let atoms = 0;
+  for (let n = -cols; n <= cols; n++) {
+    for (let m = -rows; m <= rows; m++) {
+      const ax = cx + n * v1x + m * v2x;
+      const ay = cy + n * v1y + m * v2y;
+      if (Math.abs(ax) > CHIP / 2 - 0.05 || Math.abs(ay) > CHIP / 2 - 0.05) continue;
+      if (!fine && inGold(ax, ay, nearestRing(ax, ay).x, nearestRing(ax, ay).y)) continue;
+      if (fine && inGold(ax, ay, HERO.x, HERO.y)) continue;
+      atoms++;
+      if (atoms > 2400) break;
+      for (const nb of nbs) {
+        const bx = ax + nb.x;
+        const by = ay + nb.y;
+        if (fine && inGold(bx, by, HERO.x, HERO.y)) continue;
+        const p1 = project({ x: ax, y: ay, z: ZA + 0.004 }, fr, zoom, w, h);
+        const p2 = project({ x: bx, y: by, z: ZA + 0.004 }, fr, zoom, w, h);
+        ctx.moveTo(p1.x, p1.y);
+        ctx.lineTo(p2.x, p2.y);
+      }
+    }
+  }
+  ctx.stroke();
+  if (sig.gate > 0.08 && zoom > 260) {
+    ctx.fillStyle = rgba(PAL.blue, 0.18 + sig.gate * 0.55);
+    const spread = GAP * 0.92;
+    for (let i = 0; i < 70; i++) {
+      const px = HERO.x + ROUT - ARM + hash(i, 2) * ARM;
+      const py = (hash(i, 5) - 0.5) * spread * 2 * sig.gate;
+      const pz = ZA + 0.02 + hash(i, 9) * 0.03;
+      const s = project({ x: px, y: py, z: pz }, fr, zoom, w, h);
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, 1.6 + sig.gate * 1.4, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+  ctx.restore();
+}
+
+function nearestRing(x, y) {
+  let best = RINGS[0];
+  let bd = Infinity;
+  for (const r of RINGS) {
+    const d = (r.x - x) * (r.x - x) + (r.y - y) * (r.y - y);
+    if (d < bd) { bd = d; best = r; }
+  }
+  return best;
+}
+
+function drawFields(f, fr, zoom, w, h, sig) {
+  const eAmp = sig.arrived * (0.55 + 0.45 * Math.sin(f * 0.42));
+  ctx.save();
+  ctx.lineCap = 'round';
+  if (zoom < 520) {
+    for (const r of RINGS) {
+      const lenE = (0.2 + 0.14 * sig.resonance) * Math.max(0.45, eAmp);
+      const a = { x: r.x + ROUT - ARM * 0.5, y: r.y - lenE, z: ZA + 0.08 };
+      const b = { x: a.x, y: r.y + lenE, z: a.z };
+      const pa = project(a, fr, zoom, w, h);
+      const pb = project(b, fr, zoom, w, h);
+      ctx.strokeStyle = rgba(PAL.amber, 0.35 + 0.55 * sig.resonance);
+      ctx.lineWidth = r.hero ? 2.6 : 1.8;
+      ctx.beginPath();
+      ctx.moveTo(pa.x, pa.y);
+      ctx.lineTo(pb.x, pb.y);
+      ctx.stroke();
+      const glowA = 0.05 + sig.resonance * sig.arrived * 0.22;
+      if (glowA > 0.04) {
+        const c = project({ x: r.x, y: r.y, z: ZA + 0.05 }, fr, zoom, w, h);
+        const rad = Math.max(8, ROUT * zoom * 0.85);
+        const g = ctx.createRadialGradient(c.x, c.y, 2, c.x, c.y, rad);
+        g.addColorStop(0, rgba(PAL.amber, glowA));
+        g.addColorStop(1, rgba(PAL.amber, 0));
+        ctx.fillStyle = g;
+        ctx.beginPath();
+        ctx.arc(c.x, c.y, rad, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+  }
+
+  const count = 16;
+  for (const r of RINGS) {
+    if (!r.hero && zoom > 520) continue;
+    const n = r.hero && zoom > 400 ? count : 8;
+    for (let i = 0; i < n; i++) {
+      const u = i / n + f * 0.004 * Math.max(sig.resonance, 0.02);
+      const speedVis = sig.resonance;
+      if (speedVis < 0.03) continue;
+      const p = ringPoint(r.x, r.y, u);
+      const s = project(p, fr, zoom, w, h);
+      const rubyMix = 1 - sig.resonance;
+      ctx.fillStyle = rubyMix > 0.55 ? rgba(PAL.ruby, 0.85) : rgba(PAL.gold, 0.35 + 0.6 * speedVis);
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, (r.hero ? 3.1 : 2.1), 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  if (zoom > 280) {
+    const gx = HERO.x + ROUT - ARM * 0.45;
+    ctx.lineWidth = 1.6;
+    for (let i = 0; i < 6; i++) {
+      const x = HERO.x + (ROUT - ARM) + ((i + 0.5) / 6) * ARM;
+      const bow = 0.045 * sig.resonance;
+      const pts = [];
+      for (let k = 0; k <= 12; k++) {
+        const t = k / 12;
+        const y = lerp(GAP * 0.92, -GAP * 0.92, t);
+        const z = ZA + 0.03 + Math.sin(Math.PI * t) * bow;
+        pts.push(project({ x, y, z }, fr, zoom, w, h));
+      }
+      ctx.beginPath();
+      ctx.moveTo(pts[0].x, pts[0].y);
+      for (const p of pts) ctx.lineTo(p.x, p.y);
+      ctx.strokeStyle = rgba(PAL.amber, 0.15 + 0.75 * sig.resonance);
+      ctx.stroke();
+    }
+    if (sig.gate > 0.2 && sig.resonance < 0.75) {
+      ctx.strokeStyle = rgba(PAL.ruby, 0.25 + 0.7 * sig.gate * (1 - sig.resonance));
+      ctx.lineWidth = 3;
+      const p1 = project({ x: gx, y: -GAP * 0.15, z: ZA + 0.03 }, fr, zoom, w, h);
+      const p2 = project({ x: gx, y: GAP * 0.15, z: ZA + 0.03 }, fr, zoom, w, h);
+      ctx.beginPath();
+      ctx.moveTo(p1.x, p1.y);
+      ctx.lineTo(p2.x, p2.y);
+      ctx.stroke();
+    }
+    if (sig.gate > 0.05 && zoom > 500) {
+      ctx.strokeStyle = rgba(PAL.blue, 0.25 + 0.45 * sig.gate);
+      ctx.lineWidth = 1.2;
+      for (let i = 0; i < 5; i++) {
+        const y = lerp(-GAP * 0.7, GAP * 0.7, i / 4);
+        const a = project({ x: gx, y, z: ZG - 0.04 }, fr, zoom, w, h);
+        const b = project({ x: gx, y, z: ZA + 0.012 }, fr, zoom, w, h);
+        ctx.beginPath();
+        ctx.moveTo(a.x, a.y);
+        ctx.lineTo(b.x, b.y);
+        ctx.stroke();
+      }
+    }
+    if (sig.ruby > 0.08 && zoom > 360) {
+      const c = project({ x: gx, y: 0, z: ZA + 0.04 }, fr, zoom, w, h);
+      const rad = Math.max(18, GAP * zoom * 1.3);
+      const g = ctx.createRadialGradient(c.x, c.y, 2, c.x, c.y, rad);
+      g.addColorStop(0, rgba(PAL.ruby, clamp(sig.ruby, 0, 0.85)));
+      g.addColorStop(1, rgba(PAL.ruby, 0));
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.arc(c.x, c.y, rad, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+  ctx.restore();
+}
+
+function panel(x, y, w, h) {
+  ctx.fillStyle = 'rgba(16,20,28,0.92)';
+  ctx.strokeStyle = '#2a3548';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.rect(x, y, w, h);
+  ctx.fill();
+  ctx.stroke();
+}
+
+function label(text, x, y, color, size, font) {
+  ctx.fillStyle = color || PAL.bone;
+  ctx.font = (size || 12) + 'px ' + (font || 'Inter, Liberation Sans, sans-serif');
+  ctx.fillText(text, x, y);
+}
+
+function wrapText(text, x, y, maxW, size, color) {
+  ctx.fillStyle = color;
+  ctx.font = size + 'px Inter, Liberation Sans, sans-serif';
+  const words = text.split(' ');
+  let line = '';
+  let yy = y;
+  for (const word of words) {
+    const trial = line ? line + ' ' + word : word;
+    if (ctx.measureText(trial).width > maxW && line) {
+      ctx.fillText(line, x, yy);
+      line = word;
+      yy += size + 3;
+    } else line = trial;
+  }
+  if (line) ctx.fillText(line, x, yy);
+  return yy;
+}
+
+function drawDirac(x, y, w, h, sig) {
+  panel(x, y, w, h);
+  label('FERMI LEVEL', x + 14, y + 22, PAL.mute, 11, 'JetBrains Mono, monospace');
+  label('monolayer graphene', x + 14, y + 40, PAL.bone, 14);
+  const ox = x + w * 0.5;
+  const oy = y + h * 0.62;
+  const spread = w * 0.32;
+  const rise = h * 0.28;
+  ctx.strokeStyle = '#445068';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(x + 16, oy);
+  ctx.lineTo(x + w - 16, oy);
+  ctx.moveTo(ox, y + 58);
+  ctx.lineTo(ox, y + h - 28);
+  ctx.stroke();
+  function cone(dir) {
+    ctx.beginPath();
+    ctx.moveTo(ox - spread, oy - dir * rise);
+    ctx.lineTo(ox, oy);
+    ctx.lineTo(ox + spread, oy - dir * rise);
+    ctx.strokeStyle = PAL.bone;
+    ctx.lineWidth = 1.6;
+    ctx.stroke();
+  }
+  cone(1);
+  cone(-1);
+  const efY = oy - sig.ef * rise * 0.78;
+  if (sig.ef > 0.04) {
+    const t = sig.ef * 0.78;
+    ctx.beginPath();
+    ctx.moveTo(ox - spread * t, efY);
+    ctx.lineTo(ox, oy);
+    ctx.lineTo(ox + spread * t, efY);
+    ctx.closePath();
+    ctx.fillStyle = rgba(PAL.blue, 0.28);
+    ctx.fill();
+    ctx.fillStyle = PAL.blue;
+    for (let i = 0; i < 8; i++) {
+      const u = (i + 0.5) / 8;
+      const px = lerp(ox - spread * t, ox + spread * t, u);
+      ctx.beginPath();
+      ctx.arc(px, efY + 6, 2.2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+  ctx.strokeStyle = PAL.blue;
+  ctx.setLineDash([4, 3]);
+  ctx.beginPath();
+  ctx.moveTo(x + 20, efY);
+  ctx.lineTo(x + w - 20, efY);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  label('k', x + w - 22, oy - 6, PAL.mute, 12);
+  label('E', ox + 6, y + 70, PAL.mute, 12);
+  label(sig.ef < 0.08 ? 'EF at Dirac point' : 'EF above Dirac point', x + 14, y + h - 14, PAL.blue, 12);
+  label('EF scales as sqrt(n). n scales with Vg.', x + 14, y + h - 32, PAL.mute, 11, 'JetBrains Mono, monospace');
+}
+
+function drawScope(x, y, w, h, f, sig) {
+  panel(x, y, w, h);
+  label('GATE AND TRANSMISSION', x + 14, y + 22, PAL.mute, 11, 'JetBrains Mono, monospace');
+  const plotX = x + 16;
+  const plotY = y + 86;
+  const plotW = w - 32;
+  const plotH = h - 150;
+  ctx.strokeStyle = '#243044';
+  ctx.strokeRect(plotX, plotY, plotW, plotH);
+  ctx.font = '11px JetBrains Mono, monospace';
+  ctx.fillStyle = PAL.mute;
+  ctx.fillText('1', plotX + 4, plotY + 12);
+  ctx.fillText('0', plotX + 4, plotY + plotH - 4);
+  ctx.beginPath();
+  for (let i = 0; i <= 160; i++) {
+    const ff = f - 160 + i;
+    const g = ff < 0 ? 0 : gateLevel(ff);
+    const px = plotX + (i / 160) * plotW;
+    const py = plotY + plotH - g * (plotH - 8) - 4;
+    if (i === 0) ctx.moveTo(px, py);
+    else ctx.lineTo(px, py);
+  }
+  ctx.strokeStyle = PAL.blue;
+  ctx.lineWidth = 1.6;
+  ctx.stroke();
+  ctx.beginPath();
+  for (let i = 0; i <= 160; i++) {
+    const ff = f - 160 + i;
+    const T = ff < 0 ? 0.85 : signals(ff).T;
+    const px = plotX + (i / 160) * plotW;
+    const py = plotY + plotH - (T / 0.9) * (plotH - 8) - 4;
+    if (i === 0) ctx.moveTo(px, py);
+    else ctx.lineTo(px, py);
+  }
+  ctx.strokeStyle = PAL.amber;
+  ctx.stroke();
+  label('Vg', x + 16, y + 48, PAL.blue, 12, 'JetBrains Mono, monospace');
+  label('T', x + 52, y + 48, PAL.amber, 12, 'JetBrains Mono, monospace');
+  ctx.fillStyle = PAL.bone;
+  ctx.font = '42px JetBrains Mono, monospace';
+  const pct = sig.T * 100;
+  const text = (pct >= 10 || pct < 1 ? pct.toFixed(0) : pct.toFixed(1)) + '%';
+  ctx.fillText(text, x + 16, y + h - 18);
+  ctx.font = '12px Inter, sans-serif';
+  ctx.fillStyle = PAL.mute;
+  ctx.fillText('transmitted amplitude', x + 120, y + h - 28);
+}
+
+function drawEye(x, y, w, h, f) {
+  panel(x, y, w, h);
+  label('READOUT PLANE', x + 14, y + 22, PAL.mute, 11, 'JetBrains Mono, monospace');
+  label('Envelope eye, square-gate drive', x + 14, y + 42, PAL.bone, 14);
+  const plotX = x + 36;
+  const plotY = y + 58;
+  const plotW = w - 78;
+  const plotH = h - 96;
+  ctx.strokeStyle = '#243044';
+  ctx.strokeRect(plotX, plotY, plotW, plotH);
+  ctx.strokeStyle = 'rgba(255,133,0,0.35)';
+  ctx.setLineDash([3, 4]);
+  ctx.beginPath();
+  const y85 = plotY + 8 + (1 - 0.85) * (plotH - 16);
+  const y02 = plotY + 8 + (1 - 0.02) * (plotH - 16);
+  ctx.moveTo(plotX, y85);
+  ctx.lineTo(plotX + plotW, y85);
+  ctx.moveTo(plotX, y02);
+  ctx.lineTo(plotX + plotW, y02);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.font = '10px JetBrains Mono, monospace';
+  ctx.fillStyle = PAL.mute;
+  ctx.fillText('85%', x + 8, y85 + 3);
+  ctx.fillText('2%', x + 14, y02 + 3);
+  ctx.fillText('bit phase', plotX + plotW * 0.34, plotY + plotH + 16);
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(plotX, plotY, plotW, plotH);
+  ctx.clip();
+  const period = 64;
+  const shown = Math.min(12, Math.max(0, Math.floor((f - 751) / period) + 1));
+  for (let c = 0; c < shown; c++) {
+    const f0 = 751 + c * period;
+    const phaseJ = (hash(c, 1) - 0.5) * 0.03;
+    ctx.beginPath();
+    for (let i = 0; i <= 80; i++) {
+      const phase = (i / 80) * 2;
+      const ff = f0 + (phase + phaseJ) * period;
+      const env = signals(ff).T + (hash(c, i + 4) - 0.5) * 0.03;
+      const px = plotX + (phase / 2) * plotW;
+      const py = plotY + 8 + (1 - env) * (plotH - 16);
+      if (i === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    }
+    const live = c === shown - 1;
+    ctx.strokeStyle = live ? PAL.amber : 'rgba(255,133,0,0.33)';
+    ctx.lineWidth = live ? 1.8 : 1;
+    ctx.stroke();
+  }
+  ctx.restore();
+  const now = signals(Math.min(f, TOTAL)).T;
+  const lampX = x + w - 26;
+  ctx.fillStyle = '#141a24';
+  ctx.fillRect(lampX, plotY, 12, plotH);
+  ctx.strokeStyle = '#243044';
+  ctx.strokeRect(lampX, plotY, 12, plotH);
+  ctx.fillStyle = rgba(PAL.amber, 0.35 + now * 0.65);
+  ctx.fillRect(lampX, plotY + plotH - now * plotH, 12, Math.max(2, now * plotH));
+  label('beam', lampX - 6, y + h - 12, PAL.amber, 10, 'JetBrains Mono, monospace');
+  label('schematic, time-dilated', x + 14, y + h - 12, PAL.mute, 11);
+}
+
+function drawStack(x, y, w, h) {
+  panel(x, y, w, h);
+  label('STACK', x + 14, y + 22, PAL.mute, 11, 'JetBrains Mono, monospace');
+  const rows = [
+    [PAL.gold, 'Gold split ring', 'LC resonator'],
+    [PAL.graphene, 'Monolayer graphene', 'continuous sheet'],
+    [PAL.quartz, 'Quartz buffer', 'gate dielectric'],
+    [PAL.si, 'High-resistivity Si', 'back-gate body']
+  ];
+  rows.forEach((r, i) => {
+    const yy = y + 42 + i * 36;
+    ctx.fillStyle = r[0];
+    ctx.fillRect(x + 14, yy, 18, 18);
+    ctx.strokeStyle = '#445068';
+    ctx.strokeRect(x + 14, yy, 18, 18);
+    label(r[1], x + 42, yy + 8, PAL.bone, 13);
+    label(r[2], x + 42, yy + 22, PAL.mute, 11);
+  });
+}
+
+function drawKey(x, y, w, h) {
+  panel(x, y, w, h);
+  label('PLATE', x + 14, y + 22, PAL.mute, 11, 'JetBrains Mono, monospace');
+  const rows = [
+    [PAL.amber, '1.0 THz field'],
+    [PAL.blue, 'Gate, carrier injection'],
+    [PAL.ruby, 'Gap damping']
+  ];
+  rows.forEach((r, i) => {
+    const yy = y + 44 + i * 28;
+    ctx.fillStyle = r[0];
+    ctx.fillRect(x + 14, yy, 14, 14);
+    label(r[1], x + 38, yy + 12, PAL.bone, 13);
+  });
+  label('Normal incidence. E across the splits.', x + 14, y + h - 36, PAL.mute, 12);
+  label('λ0 = 300 μm at 1.0 THz.', x + 14, y + h - 18, PAL.mute, 12);
+}
+
+const CAPTIONS = [
+  'Cryo-cooled carrier. Gold wire bonds and a GSG probe seat on the perimeter pads.',
+  'Plan view of the array. One graphene sheet under every ring. The 1.0 THz field arrives at normal incidence.',
+  'Back-gate bias moves the Fermi level off the Dirac point and raises the carrier density in the gap.',
+  'The conductive sheet shunts the split. Loop current damps and transmitted amplitude falls from 85% to 2%.',
+  'A megahertz square wave, drawn slowed, chops the transmitted beam. The readout accumulates the envelope eye.'
+];
+
+function drawHUD(f, w, h, sig, cam) {
+  const shot = shotOf(f);
+  const narrow = w < 860;
+  const leftW = 280;
+  const rightW = 300;
+  const shotName = ['CARRIER', 'ARRAY  1.0 THz', 'FERMI SHIFT', 'RESONANCE COLLAPSE', 'MEGAHERTZ GATE'][shot];
+  const clock = formatTime(f / FPS);
+  if (narrow) {
+    label('GRAPHENE SRR MODULATOR', 16, 24, PAL.bone, 15);
+    label(clock + '   f' + String(f).padStart(4, '0') + '   ' + shotName, 16, 44, PAL.amber, 11, 'JetBrains Mono, monospace');
+  } else {
+    label('GRAPHENE SPLIT-RING MODULATOR', 20, 32, PAL.bone, 18);
+    label('Terahertz amplitude anatomy jig  ·  schematic', 20, 52, PAL.mute, 13);
+    ctx.textAlign = 'right';
+    label(clock + '   f' + String(f).padStart(4, '0'), w - 20, 32, PAL.bone, 14, 'JetBrains Mono, monospace');
+    label(shotName, w - 20, 52, PAL.amber, 12, 'JetBrains Mono, monospace');
+    ctx.textAlign = 'left';
+  }
+
+  if (!narrow) {
+    if (shot === 0) drawStack(20, 72, leftW, 196);
+    else if (shot === 1) drawKey(20, 72, leftW, 168);
+    else drawDirac(20, 72, leftW, 300, sig);
+
+    if (shot >= 2 && shot <= 3) drawScope(w - rightW - 20, 72, rightW, 300, f, sig);
+    if (shot === 4) drawEye(w - rightW - 20, 72, rightW, 280, f);
+    if (shot === 1) {
+      panel(w - rightW - 20, 72, rightW, 116);
+      label('INCIDENT FIELD', w - rightW - 6, 96, PAL.mute, 11, 'JetBrains Mono, monospace');
+      label(sig.arrived < 0.5 ? 'Approaching' : 'On the array', w - rightW - 6, 122, PAL.amber, 20);
+      label('k into the page in plan view', w - rightW - 6, 150, PAL.mute, 12);
+      if (cam.el > 72) {
+        label('⊗  k', w - rightW - 6, 170, PAL.amber, 13, 'JetBrains Mono, monospace');
+      }
+    }
+  } else if (shot >= 2) {
+    ctx.font = '22px JetBrains Mono, monospace';
+    ctx.fillStyle = PAL.bone;
+    const pct = (sig.T * 100);
+    ctx.fillText((pct >= 10 ? pct.toFixed(0) : pct.toFixed(1)) + '% T', 16, 72);
+  }
+
+  const foot = shot === 3
+    ? 'Specified polarity for this jig: short the gap, collapse the LC, drop transmission. Thicknesses exaggerated. 85% and 2% are scene states, not a cited measurement.'
+    : 'Schematic. Thicknesses exaggerated so the quartz buffer and the monolayer stay visible. 85% and 2% are scene states, not a cited device result.';
+  if (narrow) {
+    ctx.fillStyle = 'rgba(7,8,11,0.94)';
+    ctx.fillRect(0, h - 92, w, 92);
+    const y1 = wrapText(CAPTIONS[shot], 12, h - 78, w - 24, 12, PAL.bone);
+    wrapText(foot, 12, y1 + 16, w - 24, 10, PAL.mute);
+  } else {
+    ctx.fillStyle = 'rgba(7,8,11,0.92)';
+    ctx.fillRect(0, h - 108, w, 52);
+    label(CAPTIONS[shot], 20, h - 88, PAL.bone, 14);
+    label(foot, 20, h - 68, PAL.mute, 11);
+  }
+}
+
+function formatTime(t) {
+  const s = Math.max(0, t);
+  const m = Math.floor(s / 60);
+  const sec = s - m * 60;
+  return String(m).padStart(2, '0') + ':' + sec.toFixed(2).padStart(5, '0');
+}
+
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const w = window.innerWidth;
+  const h = window.innerHeight;
+  canvas.width = Math.max(1, Math.floor(w * dpr));
+  canvas.height = Math.max(1, Math.floor(h * dpr));
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return { w, h };
+}
+
+function render() {
+  const { w, h } = resize();
+  const f = clamp(Math.round(time * FPS), 0, TOTAL);
+  const cam = cameraAt(f);
+  const eye = eyeOf(cam);
+  const fr = frameOf(cam, eye);
+  fr.look = cam.look;
+  const zoom = Math.min(w, h) * 0.50 / cam.dist;
+  ctx.fillStyle = PAL.ink;
+  ctx.fillRect(0, 0, w, h);
+  ctx.strokeStyle = 'rgba(255,255,255,0.035)';
+  ctx.lineWidth = 1;
+  for (let x = 40; x < w; x += 44) {
+    ctx.beginPath();
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, h);
+    ctx.stroke();
+  }
+  for (let y = 40; y < h; y += 44) {
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(w, y);
+    ctx.stroke();
+  }
+  const pack = build(f, fr, zoom, w, h);
+  drawScene(pack);
+  drawLattice(f, fr, zoom, w, h, pack.sig);
+  drawFields(f, fr, zoom, w, h, pack.sig);
+  drawCallouts(f, fr, zoom, w, h, cam);
+  drawHUD(f, w, h, pack.sig, cam);
+  drawRegistration(w, h);
+  scrub.value = String(f);
+  const clock = formatTime(f / FPS);
+  readout.innerHTML = '<b>' + clock + '</b> · f' + String(f).padStart(4, '0') + ' / 1020';
+  shotEls.forEach((el, i) => el.classList.toggle('on', i === shotOf(f)));
+  playBtn.textContent = playing ? 'Pause' : (f >= TOTAL ? 'Replay' : 'Play');
+}
+
+function drawRegistration(w, h) {
+  if (w < 860) return;
+  ctx.strokeStyle = 'rgba(231,225,214,0.45)';
+  ctx.lineWidth = 1;
+  const m = 12;
+  const L = 16;
+  const corners = [[m, m, 1, 1], [w - m, m, -1, 1], [m, h - m, 1, -1], [w - m, h - m, -1, -1]];
+  for (const c of corners) {
+    ctx.beginPath();
+    ctx.moveTo(c[0], c[1] + c[3] * L);
+    ctx.lineTo(c[0], c[1]);
+    ctx.lineTo(c[0] + c[2] * L, c[1]);
+    ctx.stroke();
+  }
+}
+
+function drawCallouts(f, fr, zoom, w, h, cam) {
+  if (w < 860) return;
+  const shot = shotOf(f);
+  const items = [];
+  if (shot === 0) {
+    items.push(call('1', 'HR-Si substrate', { x: 1.2, y: 2.55, z: Z0 + SI_H * 0.45 }, 220, 40));
+    items.push(call('2', 'Quartz buffer', { x: 1.5, y: 2.55, z: ZQ + Q_H * 0.5 }, 250, -10));
+    items.push(call('3', 'Graphene sheet', { x: -1.4, y: 2.2, z: ZA }, -180, -30));
+    items.push(call('4', 'GSG probe', { x: CHIP / 2 + 0.55, y: 0, z: ZA + 0.35 }, 150, 70));
+    items.push(call('5', 'Au wire bond', { x: 2.7, y: 0.2, z: 0.85 }, 80, -70));
+  } else if (shot === 1) {
+    items.push(call('4', 'Split-ring array', { x: 0, y: 0, z: ZA + AU }, 0, -150));
+    items.push(call('3', 'Unbroken graphene', { x: -1.6, y: 1.4, z: ZA }, -160, 40));
+    items.push(call('6', 'Capacitive split', { x: ROUT - ARM * 0.5, y: 0, z: ZA }, 140, 70));
+  } else if (shot === 2 || shot === 3) {
+    if (cam.dist > 0.6) return;
+    items.push(call('6', 'Capacitive split', { x: ROUT - ARM * 0.5, y: 0, z: ZA + 0.05 }, 120, -80));
+    items.push(call('7', 'Gate field', { x: ROUT - ARM * 0.5, y: 0.02, z: ZQ }, -130, 70));
+  }
+  ctx.font = '12px Inter, sans-serif';
+  for (const item of items) {
+    const p = project(item.at, fr, zoom, w, h);
+    if (p.x < -40 || p.x > w + 40 || p.y < 0 || p.y > h) continue;
+    const lx = clamp(p.x + item.ox, 300, w - 340);
+    const ly = clamp(p.y + item.oy, 80, h - 120);
+    ctx.strokeStyle = 'rgba(231,225,214,0.55)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(p.x, p.y);
+    ctx.lineTo(lx, ly);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, 3, 0, Math.PI * 2);
+    ctx.fillStyle = PAL.amber;
+    ctx.fill();
+    const tw = ctx.measureText(item.text).width;
+    ctx.fillStyle = '#10141c';
+    ctx.fillRect(lx - 16, ly - 16, tw + 28, 24);
+    ctx.strokeStyle = '#2a3548';
+    ctx.strokeRect(lx - 16, ly - 16, tw + 28, 24);
+    ctx.fillStyle = PAL.amber;
+    ctx.font = '11px JetBrains Mono, monospace';
+    ctx.fillText(item.n, lx - 8, ly + 1);
+    ctx.fillStyle = PAL.bone;
+    ctx.font = '12px Inter, sans-serif';
+    ctx.fillText(item.text, lx + 8, ly + 1);
+  }
+}
+
+function call(n, text, at, ox, oy) {
+  return { n, text, at, ox, oy };
+}
+
+function frameStep(dt) {
+  if (!playing) return;
+  time += dt;
+  if (time >= TOTAL / FPS) {
+    time = TOTAL / FPS;
+    playing = false;
+  }
+}
+
+function loop(now) {
+  if (!lastTick) lastTick = now;
+  const dt = Math.min(0.05, (now - lastTick) / 1000);
+  lastTick = now;
+  frameStep(dt);
+  render();
+  requestAnimationFrame(loop);
+}
+
+playBtn.addEventListener('click', () => {
+  if (time >= TOTAL / FPS) time = 0;
+  playing = !playing;
+  lastTick = 0;
+});
+scrub.addEventListener('input', () => {
+  playing = false;
+  time = Number(scrub.value) / FPS;
+});
+window.addEventListener('keydown', (e) => {
+  if (e.target && e.target.tagName === 'INPUT') return;
+  if (e.code === 'Space') {
+    e.preventDefault();
+    playBtn.click();
+  } else if (e.code === 'ArrowRight') {
+    playing = false;
+    time = clamp(time + (e.shiftKey ? 10 : 1) / FPS, 0, TOTAL / FPS);
+  } else if (e.code === 'ArrowLeft') {
+    playing = false;
+    time = clamp(time - (e.shiftKey ? 10 : 1) / FPS, 0, TOTAL / FPS);
+  } else if (e.code === 'Home') {
+    playing = false;
+    time = 0;
+  } else if (e.code === 'End') {
+    playing = false;
+    time = TOTAL / FPS;
+  }
+});
+window.addEventListener('resize', render);
+
+window.__jig = {
+  seek(frame) {
+    playing = false;
+    time = clamp(frame, 0, TOTAL) / FPS;
+    render();
+  }
+};
+
+if (reduce) {
+  readout.insertAdjacentText('beforeend', '  ·  motion paused');
+}
+
+if (qFrame === null) requestAnimationFrame(loop);
+else render();
+</script>
+</body>
+</html>
